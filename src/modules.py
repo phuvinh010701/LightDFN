@@ -37,29 +37,6 @@ def as_real(x: Tensor):
     return x
 
 
-def erb_fb(
-    widths: np.ndarray, sr: int, normalized: bool = True, inverse: bool = False
-) -> Tensor:
-    """Create ERB filterbank."""
-    n_freqs = int(np.sum(widths))
-    all_freqs = torch.linspace(0, sr // 2, n_freqs + 1)[:-1]
-
-    b_pts = np.cumsum([0] + widths.tolist()).astype(int)[:-1]
-
-    fb = torch.zeros((all_freqs.shape[0], b_pts.shape[0]))
-    for i, (b, w) in enumerate(zip(b_pts.tolist(), widths.tolist())):
-        fb[b : b + w, i] = 1
-    # Normalize to constant energy per resulting band
-    if inverse:
-        fb = fb.t()
-        if not normalized:
-            fb /= fb.sum(dim=1, keepdim=True)
-    else:
-        if normalized:
-            fb /= fb.sum(dim=0)
-    return fb.to(device=get_device())
-
-
 class Conv2dNormAct(nn.Sequential):
     def __init__(
         self,
@@ -207,30 +184,14 @@ class GroupedLinearEinsum(nn.Module):
 
     def forward(self, x: Tensor) -> Tensor:
         # x: [..., I]
-        # Handle different input shapes
-        original_shape = x.shape
-        if len(original_shape) == 2:
-            # [B, I] -> add time dimension
-            x = x.unsqueeze(1)
-
-        b, t = x.shape[0], x.shape[1]
-        # Flatten any extra dimensions into the last dimension
-        x = x.reshape(b, t, -1)
-
-        # Ensure input size matches expected
-        if x.shape[-1] != self.input_size:
-            raise ValueError(
-                f"Expected input size {self.input_size}, got {x.shape[-1]}"
-            )
-
+        b, t, _ = x.shape
+        # new_shape = list(x.shape)[:-1] + [self.groups, self.ws]
         new_shape = (b, t, self.groups, self.ws)
         x = x.view(new_shape)
+        # The better way, but not supported by torchscript
+        # x = x.unflatten(-1, (self.groups, self.ws))  # [..., G, I/G]
         x = torch.einsum("btgi,gih->btgh", x, self.weight)  # [..., G, H/G]
         x = x.flatten(2, 3)  # [B, T, H]
-
-        # Restore original shape structure if needed
-        if len(original_shape) == 2:
-            x = x.squeeze(1)
 
         return x
 
@@ -257,11 +218,11 @@ class Mask(nn.Module):
         return spec * mask
 
 
-class SqueezedGRU_S(nn.Module):
+class SqueezedLiGRU_S(nn.Module):
     """Squeezed GRU with Li-GRU instead of standard GRU.
 
     This module wraps Li-GRU to provide an interface compatible with the original
-    DeepFilterNet3's SqueezedGRU_S that used standard GRU.
+    DeepFilterNet3's SqueezedLiGRU_S that used standard GRU.
     """
 
     input_size: Final[int]

@@ -10,17 +10,19 @@ import torch
 from torch import Tensor, nn
 from typing_extensions import Final
 
-from src.config import ModelConfig
+from src.config import ModelConfig, config
 from src.erb import get_erb_filterbanks
 from src.modules import (
     Conv2dNormAct,
     ConvTranspose2dNormAct,
     GroupedLinearEinsum,
     Mask,
-    SqueezedGRU_S,
+    SqueezedLiGRU_S,
     get_device,
 )
 
+PI = 3.1415926535897932384626433
+eps = 1e-12
 
 class Add(nn.Module):
     def forward(self, a, b):
@@ -35,23 +37,22 @@ class Concat(nn.Module):
 class LightEncoder(nn.Module):
     """Encoder module with Li-GRU for LightDeepFilterNet."""
 
-    def __init__(self, config: ModelConfig):
+    def __init__(self, config: ModelConfig = config):
         super().__init__()
-        p = config
-        assert p.nb_erb % 4 == 0, "erb_bins should be divisible by 4"
+        assert config.nb_erb % 4 == 0, "erb_bins should be divisible by 4"
 
         self.erb_conv0 = Conv2dNormAct(
             in_ch=1,
-            out_ch=p.conv_ch,
-            kernel_size=p.conv_kernel_inp,
+            out_ch=config.conv_ch,
+            kernel_size=config.conv_kernel_inp,
             bias=False,
             separable=True,
         )
         conv_layer = partial(
             Conv2dNormAct,
-            in_ch=p.conv_ch,
-            out_ch=p.conv_ch,
-            kernel_size=p.conv_kernel,
+            in_ch=config.conv_ch,
+            out_ch=config.conv_ch,
+            kernel_size=config.conv_kernel,
             bias=False,
             separable=True,
         )
@@ -60,56 +61,57 @@ class LightEncoder(nn.Module):
         self.erb_conv3 = conv_layer(fstride=1)
         self.df_conv0 = Conv2dNormAct(
             in_ch=2,
-            out_ch=p.conv_ch,
-            kernel_size=p.conv_kernel_inp,
+            out_ch=config.conv_ch,
+            kernel_size=config.conv_kernel_inp,
             bias=False,
             separable=True,
         )
         self.df_conv1 = conv_layer(fstride=2)
-        self.erb_bins = p.nb_erb
-        self.emb_in_dim = p.conv_ch * p.nb_erb // 4
-        self.emb_dim = p.emb_hidden_dim
-        self.emb_out_dim = p.conv_ch * p.nb_erb // 4
+        self.erb_bins = config.nb_erb
+        self.emb_in_dim = config.conv_ch * config.nb_erb // 4
+        self.emb_dim = config.emb_hidden_dim
+        self.emb_out_dim = config.conv_ch * config.nb_erb // 4
         df_fc_emb = GroupedLinearEinsum(
-            p.conv_ch * p.nb_df // 2, self.emb_in_dim, groups=p.enc_lin_groups
+            config.conv_ch * config.nb_df // 2,
+            self.emb_in_dim,
+            groups=config.enc_lin_groups,
         )
         self.df_fc_emb = nn.Sequential(df_fc_emb, nn.ReLU(inplace=True))
-        if p.enc_concat:
+        if config.enc_concat:
             self.emb_in_dim *= 2
             self.combine = Concat()
         else:
             self.combine = Add()
-        self.emb_n_layers = p.emb_num_layers
-        if p.emb_gru_skip_enc == "none":
+        self.emb_n_layers = config.emb_num_layers
+        if config.emb_gru_skip_enc == "none":
             skip_op = None
-        elif p.emb_gru_skip_enc == "identity":
+        elif config.emb_gru_skip_enc == "identity":
             assert self.emb_in_dim == self.emb_out_dim, "Dimensions do not match"
             skip_op = partial(nn.Identity)
-        elif p.emb_gru_skip_enc == "groupedlinear":
+        elif config.emb_gru_skip_enc == "groupedlinear":
             skip_op = partial(
                 GroupedLinearEinsum,
                 input_size=self.emb_out_dim,
                 hidden_size=self.emb_out_dim,
-                groups=p.lin_groups,
+                groups=config.lin_groups,
             )
         else:
             raise NotImplementedError()
 
-        # Using Li-GRU instead of standard GRU
-        self.emb_gru = SqueezedGRU_S(
+        self.emb_gru = SqueezedLiGRU_S(
             self.emb_in_dim,
             self.emb_dim,
             output_size=self.emb_out_dim,
             num_layers=1,
             batch_first=True,
             gru_skip_op=skip_op,
-            linear_groups=p.lin_groups,
+            linear_groups=config.lin_groups,
             linear_act_layer=partial(nn.ReLU, inplace=True),
-            batch_size=p.batch_size,
+            batch_size=config.batch_size,
         )
         self.lsnr_fc = nn.Sequential(nn.Linear(self.emb_out_dim, 1), nn.Sigmoid())
-        self.lsnr_scale = p.lsnr_max - p.lsnr_min
-        self.lsnr_offset = p.lsnr_min
+        self.lsnr_scale = config.lsnr_max - config.lsnr_min
+        self.lsnr_offset = config.lsnr_min
 
     def forward(
         self, feat_erb: Tensor, feat_spec: Tensor
@@ -140,45 +142,44 @@ class LightEncoder(nn.Module):
 class LightErbDecoder(nn.Module):
     """ERB Decoder module with Li-GRU for LightDeepFilterNet."""
 
-    def __init__(self, config: ModelConfig):
+    def __init__(self, config: ModelConfig = config):
         super().__init__()
-        p = config
-        assert p.nb_erb % 8 == 0, "erb_bins should be divisible by 8"
+        assert config.nb_erb % 8 == 0, "erb_bins should be divisible by 8"
 
-        self.emb_in_dim = p.conv_ch * p.nb_erb // 4
-        self.emb_dim = p.emb_hidden_dim
-        self.emb_out_dim = p.conv_ch * p.nb_erb // 4
+        self.emb_in_dim = config.conv_ch * config.nb_erb // 4
+        self.emb_dim = config.emb_hidden_dim
+        self.emb_out_dim = config.conv_ch * config.nb_erb // 4
 
-        if p.emb_gru_skip == "none":
+        if config.emb_gru_skip == "none":
             skip_op = None
-        elif p.emb_gru_skip == "identity":
+        elif config.emb_gru_skip == "identity":
             assert self.emb_in_dim == self.emb_out_dim, "Dimensions do not match"
             skip_op = partial(nn.Identity)
-        elif p.emb_gru_skip == "groupedlinear":
+        elif config.emb_gru_skip == "groupedlinear":
             skip_op = partial(
                 GroupedLinearEinsum,
                 input_size=self.emb_in_dim,
                 hidden_size=self.emb_out_dim,
-                groups=p.lin_groups,
+                groups=config.lin_groups,
             )
         else:
             raise NotImplementedError()
 
         # Using Li-GRU instead of standard GRU
-        self.emb_gru = SqueezedGRU_S(
+        self.emb_gru = SqueezedLiGRU_S(
             self.emb_in_dim,
             self.emb_dim,
             output_size=self.emb_out_dim,
-            num_layers=p.emb_num_layers - 1,
+            num_layers=config.emb_num_layers - 1,
             batch_first=True,
             gru_skip_op=skip_op,
-            linear_groups=p.lin_groups,
+            linear_groups=config.lin_groups,
             linear_act_layer=partial(nn.ReLU, inplace=True),
-            batch_size=p.batch_size,
+            batch_size=config.batch_size,
         )
         tconv_layer = partial(
             ConvTranspose2dNormAct,
-            kernel_size=p.convt_kernel,
+            kernel_size=config.convt_kernel,
             bias=False,
             separable=True,
         )
@@ -188,15 +189,20 @@ class LightErbDecoder(nn.Module):
             separable=True,
         )
         # convt: TransposedConvolution, convp: Pathway (encoder to decoder) convolutions
-        self.conv3p = conv_layer(p.conv_ch, p.conv_ch, kernel_size=1)
-        self.convt3 = conv_layer(p.conv_ch, p.conv_ch, kernel_size=p.conv_kernel)
-        self.conv2p = conv_layer(p.conv_ch, p.conv_ch, kernel_size=1)
-        self.convt2 = tconv_layer(p.conv_ch, p.conv_ch, fstride=2)
-        self.conv1p = conv_layer(p.conv_ch, p.conv_ch, kernel_size=1)
-        self.convt1 = tconv_layer(p.conv_ch, p.conv_ch, fstride=2)
-        self.conv0p = conv_layer(p.conv_ch, p.conv_ch, kernel_size=1)
+        self.conv3p = conv_layer(config.conv_ch, config.conv_ch, kernel_size=1)
+        self.convt3 = conv_layer(
+            config.conv_ch, config.conv_ch, kernel_size=config.conv_kernel
+        )
+        self.conv2p = conv_layer(config.conv_ch, config.conv_ch, kernel_size=1)
+        self.convt2 = tconv_layer(config.conv_ch, config.conv_ch, fstride=2)
+        self.conv1p = conv_layer(config.conv_ch, config.conv_ch, kernel_size=1)
+        self.convt1 = tconv_layer(config.conv_ch, config.conv_ch, fstride=2)
+        self.conv0p = conv_layer(config.conv_ch, config.conv_ch, kernel_size=1)
         self.conv0_out = conv_layer(
-            p.conv_ch, 1, kernel_size=p.conv_kernel, activation_layer=nn.Sigmoid
+            config.conv_ch,
+            1,
+            kernel_size=config.conv_kernel,
+            activation_layer=nn.Sigmoid,
         )
 
     def forward(
@@ -239,51 +245,54 @@ class LightDfDecoder(nn.Module):
 
     def __init__(self, config: ModelConfig):
         super().__init__()
-        p = config
-        layer_width = p.conv_ch
+        layer_width = config.conv_ch
 
-        self.emb_in_dim = p.conv_ch * p.nb_erb // 4
-        self.emb_dim = p.df_hidden_dim
+        self.emb_in_dim = config.conv_ch * config.nb_erb // 4
+        self.emb_dim = config.df_hidden_dim
 
-        self.df_n_hidden = p.df_hidden_dim
-        self.df_n_layers = p.df_num_layers
-        self.df_order = p.df_order
-        self.df_bins = p.nb_df
-        self.df_out_ch = p.df_order * 2
+        self.df_n_hidden = config.df_hidden_dim
+        self.df_n_layers = config.df_num_layers
+        self.df_order = config.df_order
+        self.df_bins = config.nb_df
+        self.df_out_ch = config.df_order * 2
 
         conv_layer = partial(Conv2dNormAct, separable=True, bias=False)
-        kt = p.df_pathway_kernel_size_t
+        kt = config.df_pathway_kernel_size_t
         self.df_convp = conv_layer(
             layer_width, self.df_out_ch, fstride=1, kernel_size=(kt, 1)
         )
 
         # Using Li-GRU instead of standard GRU
-        self.df_gru = SqueezedGRU_S(
+        self.df_gru = SqueezedLiGRU_S(
             self.emb_in_dim,
             self.emb_dim,
             num_layers=self.df_n_layers,
             batch_first=True,
             gru_skip_op=None,
             linear_act_layer=partial(nn.ReLU, inplace=True),
-            batch_size=p.batch_size,
+            batch_size=config.batch_size,
         )
-        p.df_gru_skip = p.df_gru_skip.lower()
-        assert p.df_gru_skip in ("none", "identity", "groupedlinear")
+        config.df_gru_skip = config.df_gru_skip.lower()
+        assert config.df_gru_skip in ("none", "identity", "groupedlinear")
         self.df_skip: Optional[nn.Module]
-        if p.df_gru_skip == "none":
+        if config.df_gru_skip == "none":
             self.df_skip = None
-        elif p.df_gru_skip == "identity":
-            assert p.emb_hidden_dim == p.df_hidden_dim, "Dimensions do not match"
+        elif config.df_gru_skip == "identity":
+            assert config.emb_hidden_dim == config.df_hidden_dim, (
+                "Dimensions do not match"
+            )
             self.df_skip = nn.Identity()
-        elif p.df_gru_skip == "groupedlinear":
+        elif config.df_gru_skip == "groupedlinear":
             self.df_skip = GroupedLinearEinsum(
-                self.emb_in_dim, self.emb_dim, groups=p.lin_groups
+                self.emb_in_dim, self.emb_dim, groups=config.lin_groups
             )
         else:
             raise NotImplementedError()
         self.df_out: nn.Module
         out_dim = self.df_bins * self.df_out_ch
-        df_out = GroupedLinearEinsum(self.df_n_hidden, out_dim, groups=p.lin_groups)
+        df_out = GroupedLinearEinsum(
+            self.df_n_hidden, out_dim, groups=config.lin_groups
+        )
         self.df_out = nn.Sequential(df_out, nn.Tanh())
         self.df_fc_a = nn.Sequential(nn.Linear(self.df_n_hidden, 1), nn.Sigmoid())
 
@@ -299,7 +308,7 @@ class LightDfDecoder(nn.Module):
 
 
 class LightDeepFilteringModule(nn.Module):
-    """Optimized deep filtering using unfold + einsum (matches original implementation)."""
+    """Optimized deep filtering using unfold + einsum"""
 
     def __init__(self, num_freqs: int, frame_size: int, lookahead: int = 0):
         super().__init__()
@@ -349,8 +358,8 @@ class LightDeepFilteringModule(nn.Module):
         # Result: [B, 1, T, F_df]
         spec_filtered = torch.einsum("...tfn,...ntf->...tf", spec_f, coefs_reshaped)
 
-        # Convert back to real representation
-        return torch.view_as_real(spec_filtered)  # [B, 1, T, F_df, 2]
+        spec[..., : self.num_freqs, :] = torch.view_as_real(spec_filtered)
+        return spec
 
 
 class LightDeepFilterNet(nn.Module):
@@ -365,56 +374,54 @@ class LightDeepFilterNet(nn.Module):
 
     def __init__(
         self,
-        config: Optional[ModelConfig] = None,
+        config: ModelConfig = config,
         erb_fb_tensor: Optional[Tensor] = None,
         erb_inv_fb_tensor: Optional[Tensor] = None,
         run_df: bool = True,
         train_mask: bool = True,
     ):
         super().__init__()
-        self.config = config if config is not None else ModelConfig()
-        p = self.config
-
-        layer_width = p.conv_ch
-        assert p.nb_erb % 8 == 0, "erb_bins should be divisible by 8"
-        self.df_lookahead = p.df_lookahead
-        self.nb_df = p.nb_df
-        self.freq_bins: int = p.fft_size // 2 + 1
-        self.emb_dim: int = layer_width * p.nb_erb
-        self.erb_bins: int = p.nb_erb
+        layer_width = config.conv_ch
+        assert config.nb_erb % 8 == 0, "erb_bins should be divisible by 8"
+        self.df_lookahead = config.df_lookahead
+        self.nb_df = config.nb_df
+        self.freq_bins: int = config.fft_size // 2 + 1
+        self.emb_dim: int = layer_width * config.nb_erb
+        self.erb_bins: int = config.nb_erb
 
         # Padding layers
-        self.pad_feat = nn.Identity()
-        self.pad_spec = nn.Identity()
+        if config.conv_lookahead > 0:
+            assert config.conv_lookahead >= config.df_lookahead
+            self.pad_feat = nn.ConstantPad2d((0, 0, -config.conv_lookahead, config.conv_lookahead), 0.0)
+        else:
+            self.pad_feat = nn.Identity()
+        if config.df_lookahead > 0:
+            self.pad_spec = nn.ConstantPad3d((0, 0, 0, 0, -config.df_lookahead, config.df_lookahead), 0.0)
+        else:
+            self.pad_spec = nn.Identity()
 
         # Initialize ERB filterbanks if not provided
-        if erb_fb_tensor is not None:
-            self.register_buffer("erb_fb", erb_fb_tensor)
-        if erb_inv_fb_tensor is not None:
-            erb_inv_fb = erb_inv_fb_tensor
-        else:
-            # Create default ERB filterbank
-            # This is a placeholder - you'd need proper ERB widths
-            erb_inv_fb = torch.eye(p.nb_erb, self.freq_bins)
+        self.register_buffer("erb_fb", erb_fb_tensor)
+        self.enc = LightEncoder()
+        self.erb_dec = LightErbDecoder()
+        self.mask = Mask(erb_inv_fb_tensor)
+        self.erb_inv_fb = erb_inv_fb_tensor
+        self.post_filter = config.mask_pf
+        self.post_filter_beta = config.pf_beta
 
-        self.enc = LightEncoder(p)
-        self.erb_dec = LightErbDecoder(p)
-        self.mask = Mask(erb_inv_fb)
-        self.erb_inv_fb = erb_inv_fb
-        self.post_filter = p.mask_pf
-        self.post_filter_beta = p.pf_beta
-
-        self.df_order = p.df_order
+        self.df_order = config.df_order
         self.df_op = LightDeepFilteringModule(
-            num_freqs=p.nb_df, frame_size=p.df_order, lookahead=self.df_lookahead
+            num_freqs=config.nb_df,
+            frame_size=config.df_order,
+            lookahead=self.df_lookahead,
         )
-        self.df_dec = LightDfDecoder(p)
-        self.df_out_transform = LightDfOutputReshapeMF(self.df_order, p.nb_df)
+        self.df_dec = LightDfDecoder(config)
+        self.df_out_transform = LightDfOutputReshapeMF(self.df_order, config.nb_df)
 
-        self.run_erb = p.nb_df + 1 < self.freq_bins
+        self.run_erb = config.nb_df + 1 < self.freq_bins
         self.run_df = run_df
         self.train_mask = train_mask
-        self.lsnr_dropout = p.lsnr_dropout
+        self.lsnr_dropout = config.lsnr_dropout
 
     def forward(
         self,
@@ -475,19 +482,14 @@ class LightDeepFilterNet(nn.Module):
             else:
                 df_coefs = self.df_dec(emb, c0)
             df_coefs = self.df_out_transform(df_coefs)
-            # df_op returns only the DF bins: [B, 1, T, F_df, 2]
-            spec_e_df = self.df_op(spec.clone(), df_coefs)
-            # Combine: use DF filtered bins for low freqs, masked spec for high freqs
-            spec_e = spec_m.clone()
-            spec_e[..., : self.nb_df, :] = spec_e_df
+            spec_e = self.df_op(spec.clone(), df_coefs)
+            spec_e[..., self.nb_df :, :] = spec_m[..., self.nb_df :, :]
         else:
             df_coefs = torch.zeros((), device=spec.device)
             spec_e = spec_m
 
         # Post-filter
         if self.post_filter and not self.training:
-            PI = 3.1415926535897932384626433
-            eps = 1e-12
             spec_complex = torch.view_as_complex(spec_e)
             spec_orig_complex = torch.view_as_complex(spec)
             mask = (spec_complex.abs() / spec_orig_complex.abs().add(eps)).clamp(eps, 1)
@@ -500,18 +502,9 @@ class LightDeepFilterNet(nn.Module):
         return spec_e, m, lsnr, df_coefs
 
 
-def count_parameters(model: nn.Module) -> int:
-    """Count the number of trainable parameters in a model."""
-    return sum(p.numel() for p in model.parameters() if p.requires_grad)
-
-
 def init_model(
-    config: Optional[ModelConfig] = None, run_df: bool = True, train_mask: bool = True
+    run_df: bool = True, train_mask: bool = True
 ):
-    """Initialize the LightDeepFilterNet model with Li-GRU."""
-    if config is None:
-        config = ModelConfig()
-
     # Generate proper ERB filterbanks
     erb_fb_tensor, erb_inv_fb_tensor = get_erb_filterbanks(
         sr=config.sr, fft_size=config.fft_size, nb_erb=config.nb_erb
@@ -526,6 +519,8 @@ def init_model(
 if __name__ == "__main__":
     """Simple test for LightDeepFilterNet forward pass."""
     # Init model
+    from src.utils import count_parameters
+    
     model = init_model()
     model.eval()
     device = get_device()
@@ -545,3 +540,4 @@ if __name__ == "__main__":
     print(f"   erb_feat: {list(erb_feat.shape)}")
     print(f"   lsnr: {list(lsnr.shape)}")
     print(f"   df_coefs: {list(df_coefs.shape)}")
+    print(f"Number of parameters: {count_parameters(model)}")

@@ -66,9 +66,12 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "torch", specifier = ">=2.10.0", index = "https://download.pytorch.org/whl/cu126" },
-    { name = "torchaudio", specifier = ">=2.10.0" },
-    { name = "torchvision", specifier = ">=0.25.0" },
+    { name = "torchaudio", specifier = ">=2.10.0", index = "https://download.pytorch.org/whl/cu126" },
+    { name = "torchvision", specifier = ">=0.25.0", index = "https://download.pytorch.org/whl/cu126" },
 ]
+
+[package.metadata.requires-dev]
+dev = []
 
 [[package]]
 name = "markupsafe"

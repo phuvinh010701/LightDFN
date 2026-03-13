@@ -1,11 +1,11 @@
-from typing import Callable, Iterable, Optional, Tuple
 import math
+from typing import Callable, Iterable, Optional, Tuple
+
 import torch
 import torch.nn as nn
 import torch.nn.init as init
 from torch import Tensor
 from torch.nn.parameter import Parameter
-import numpy as np
 from typing_extensions import Final
 
 
@@ -329,7 +329,6 @@ class LiGRU_Layer(nn.Module):
         normalization="batchnorm",
         bidirectional=False,
     ):
-
         super(LiGRU_Layer, self).__init__()
         self.hidden_size = int(hidden_size)
         self.input_size = int(input_size)
@@ -590,14 +589,17 @@ class LiGRU(nn.Module):
             else:
                 x = ligru_lay(x, hx=None)
             h.append(x[:, -1, :])
-        h = torch.stack(h, dim=1)
+
+        h_stacked = torch.stack(h, dim=1)
 
         if self.bidirectional:
-            h = h.reshape(h.shape[1] * 2, h.shape[0], self.hidden_size)
+            h_stacked = h_stacked.reshape(
+                h_stacked.shape[1] * 2, h_stacked.shape[0], self.hidden_size
+            )
         else:
-            h = h.transpose(0, 1)
+            h_stacked = h_stacked.transpose(0, 1)
 
-        return x, h
+        return x, h_stacked
 
 
 def rnn_init(module):

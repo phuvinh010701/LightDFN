@@ -6,6 +6,7 @@ based on DeepFilterNet3 that replaces all GRU layers with Li-GRU layers for impr
 
 from functools import partial
 from typing import Optional, Tuple
+
 import torch
 from torch import Tensor, nn
 from typing_extensions import Final
@@ -23,6 +24,7 @@ from src.modules import (
 
 PI = 3.1415926535897932384626433
 eps = 1e-12
+
 
 class Add(nn.Module):
     def forward(self, a, b):
@@ -392,11 +394,15 @@ class LightDeepFilterNet(nn.Module):
         # Padding layers
         if config.conv_lookahead > 0:
             assert config.conv_lookahead >= config.df_lookahead
-            self.pad_feat = nn.ConstantPad2d((0, 0, -config.conv_lookahead, config.conv_lookahead), 0.0)
+            self.pad_feat = nn.ConstantPad2d(
+                (0, 0, -config.conv_lookahead, config.conv_lookahead), 0.0
+            )
         else:
             self.pad_feat = nn.Identity()
         if config.df_lookahead > 0:
-            self.pad_spec = nn.ConstantPad3d((0, 0, 0, 0, -config.df_lookahead, config.df_lookahead), 0.0)
+            self.pad_spec = nn.ConstantPad3d(
+                (0, 0, 0, 0, -config.df_lookahead, config.df_lookahead), 0.0
+            )
         else:
             self.pad_spec = nn.Identity()
 
@@ -502,9 +508,7 @@ class LightDeepFilterNet(nn.Module):
         return spec_e, m, lsnr, df_coefs
 
 
-def init_model(
-    run_df: bool = True, train_mask: bool = True
-):
+def init_model(run_df: bool = True, train_mask: bool = True):
     # Generate proper ERB filterbanks
     erb_fb_tensor, erb_inv_fb_tensor = get_erb_filterbanks(
         sr=config.sr, fft_size=config.fft_size, nb_erb=config.nb_erb
@@ -520,7 +524,7 @@ if __name__ == "__main__":
     """Simple test for LightDeepFilterNet forward pass."""
     # Init model
     from src.utils import count_parameters
-    
+
     model = init_model()
     model.eval()
     device = get_device()
@@ -535,7 +539,7 @@ if __name__ == "__main__":
     with torch.no_grad():
         enhanced_spec, erb_feat, lsnr, df_coefs = model(spec, feat_erb, feat_spec)
 
-    print(f"✅ Forward pass OK")
+    print("✅ Forward pass OK")
     print(f"   enhanced_spec: {list(enhanced_spec.shape)}")
     print(f"   erb_feat: {list(erb_feat.shape)}")
     print(f"   lsnr: {list(lsnr.shape)}")

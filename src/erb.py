@@ -130,7 +130,7 @@ if __name__ == "__main__":
     fft_size = 960
     nb_erb = 32
 
-    print(f"Generating ERB filterbank:")
+    print("Generating ERB filterbank:")
     print(f"  Sample rate: {sr} Hz")
     print(f"  FFT size: {fft_size}")
     print(f"  ERB bands: {nb_erb}")
@@ -148,7 +148,7 @@ if __name__ == "__main__":
     erb_features = (test_input.T @ erb_fb).T  # [32, 1]
     reconstructed = (erb_features.T @ erb_inv_fb).T  # [481, 1]
 
-    print(f"\nTest reconstruction:")
+    print("\nTest reconstruction:")
     print(f"  Input shape: {test_input.shape}")
     print(f"  ERB features shape: {erb_features.shape}")
     print(f"  Reconstructed shape: {reconstructed.shape}")

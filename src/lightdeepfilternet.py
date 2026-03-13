@@ -511,7 +511,10 @@ class LightDeepFilterNet(nn.Module):
 def init_model(run_df: bool = True, train_mask: bool = True):
     # Generate proper ERB filterbanks
     erb_fb_tensor, erb_inv_fb_tensor = get_erb_filterbanks(
-        sr=config.sr, fft_size=config.fft_size, nb_erb=config.nb_erb
+        sr=config.sr,
+        fft_size=config.fft_size,
+        nb_erb=config.nb_erb,
+        min_nb_freqs=config.min_nb_freqs,
     )
 
     model = LightDeepFilterNet(

@@ -107,7 +107,9 @@ def create_erb_fb(
     return fb
 
 
-def get_erb_filterbanks(sr: int, fft_size: int, nb_erb: int) -> tuple[Tensor, Tensor]:
+def get_erb_filterbanks(
+    sr: int, fft_size: int, nb_erb: int, min_nb_freqs: int
+) -> tuple[Tensor, Tensor]:
     """Get forward and inverse ERB filterbanks.
 
     Args:
@@ -118,7 +120,7 @@ def get_erb_filterbanks(sr: int, fft_size: int, nb_erb: int) -> tuple[Tensor, Te
     Returns:
         Tuple of (erb_fb, erb_inv_fb) tensors
     """
-    widths = erb_fb_widths(sr, fft_size, nb_erb, min_nb_freqs=1)
+    widths = erb_fb_widths(sr, fft_size, nb_erb, min_nb_freqs=min_nb_freqs)
     erb_fb = create_erb_fb(widths, sr, normalized=True, inverse=False)
     erb_inv_fb = create_erb_fb(widths, sr, normalized=True, inverse=True)
     return erb_fb, erb_inv_fb
@@ -129,17 +131,18 @@ if __name__ == "__main__":
     sr = 48000
     fft_size = 960
     nb_erb = 32
+    min_nb_freqs = 2
 
     print("Generating ERB filterbank:")
     print(f"  Sample rate: {sr} Hz")
     print(f"  FFT size: {fft_size}")
     print(f"  ERB bands: {nb_erb}")
 
-    widths = erb_fb_widths(sr, fft_size, nb_erb)
+    widths = erb_fb_widths(sr, fft_size, nb_erb, min_nb_freqs)
     print(f"\nERB widths: {widths}")
     print(f"Total frequency bins: {np.sum(widths)} (expected: {fft_size // 2 + 1})")
 
-    erb_fb, erb_inv_fb = get_erb_filterbanks(sr, fft_size, nb_erb)
+    erb_fb, erb_inv_fb = get_erb_filterbanks(sr, fft_size, nb_erb, min_nb_freqs)
     print(f"\nERB filterbank shape: {erb_fb.shape}")
     print(f"ERB inverse filterbank shape: {erb_inv_fb.shape}")
 

@@ -1,12 +1,30 @@
 # LightDeepFilterNet (LightDFN)
 
-Efficient implementation of audio noise suppression using Li-GRU, based on DeepFilterNet3.
+A lightweight, efficient audio noise suppression model that replaces the standard GRU layers in [DeepFilterNet3](https://github.com/Rikorose/DeepFilterNet) with [Li-GRU](https://github.com/speechbrain/speechbrain) — a computationally cheaper recurrent unit — while preserving the deep filtering architecture.
+
+## Overview
+
+LightDFN targets real-time, resource-constrained deployment scenarios. It maintains the dual-path architecture of DeepFilterNet3 (ERB-based coarse suppression + complex deep filtering) but swaps in Li-GRU cells in the encoder and decoder pathways to reduce parameter count and inference cost.
+
+**Key specs:**
+
+| Parameter | Value |
+|---|---|
+| Sample rate | 48 kHz |
+| FFT / Hop size | 960 / 480 samples |
+| ERB bands | 32 |
+| DF bins | 96 |
+| DF order | 5 |
+| Conv channels | 64 |
+| Embedding hidden dim | 256 |
 
 ## Installation
 
+Requires Python ≥ 3.14 and a CUDA 12.6-compatible GPU (for the default PyTorch index).
+
 ```bash
-# Clone the repository (dataset branch)
-git clone https://github.com/phuvinh010701/LightDFN.git -b feat/dataset
+# Clone the repository
+git clone https://github.com/phuvinh010701/LightDFN.git
 cd LightDFN
 
 # Install dependencies using uv
@@ -15,11 +33,20 @@ uv sync
 
 ## Dataset Setup
 
-The project provides an automated script to download and prepare the speech, noise, and RIR (Room Impulse Response) corpora required for training.
+LightDFN uses 6 corpora covering clean speech, noise, music, and room impulse responses (RIRs). An automated shell script handles downloading, extraction, license filtering, and manifest generation.
 
-### Download Command
+### Datasets
 
-Run the following command to start the automated download and extraction process:
+| Dataset | Type | Profile |
+|---|---|---|
+| VCTK | Clean speech | prototype + production |
+| LibriSpeech | Clean speech | production only |
+| MUSAN | Noise & music | prototype + production |
+| FSD50K | Noise (CC0/CC-BY filtered) | prototype + production |
+| AIR / OpenAIR | RIR | prototype + production |
+| AcousticRooms | RIR | production only |
+
+### Download
 
 ```bash
 DATA_DIR="/path/to/data" \
@@ -30,29 +57,40 @@ INSTALL_AUDB=1 \
 uv run bash scripts/datasets/download_datasets.sh
 ```
 
-### Profile Comparison
+Set `PROFILE=production` for the full training set. The `AGREE_LICENSES=1` flag is required and confirms acceptance of each dataset's original license terms.
 
-The `PROFILE` variable determines which datasets are included. Use `prototype` for quick testing and `production` for full model training.
+For a full breakdown of the download pipeline, dataset structure, filtering logic, and license details, see [docs/download_datasets.md](docs/download_datasets.md).
 
-| Dataset | Type | Prototype | Production |
-| :--- | :--- | :---: | :---: |
-| **VCTK** | Speech (Clean) | ✅ | ✅ |
-| **MUSAN** | Noise & Music | ✅ | ✅ |
-| **FSD50K** | General Sound Events | ✅ | ✅ |
-| **AIR / OpenAIR** | RIR (Reverb) | ✅ | ✅ |
-| **LibriSpeech** | Speech (Clean) | ❌ | ✅ |
-| **AcousticRooms** | RIR (Reverb) | ❌ | ✅ |
+### Exploring the Data
 
-### Notes:
+A Jupyter notebook is provided to inspect waveforms, spectrograms, and audio samples:
 
-- **`AGREE_LICENSES=1`**: You must explicitly set this to confirm acceptance of the dataset licenses.
-- **`PROFILE=production`**: Recommended for training high-quality models; includes significantly more data (LibriSpeech/AcousticRooms).
-- **`INSTALL_AUDB=1`**: Automatically installs `audb`, a tool required to download the AIR and OpenAIR RIR datasets.
-- **Dependencies**: Ensure `aria2`, `zip`, and `unzip` are installed. The script uses `aria2` for high-speed, parallel downloads by default.
-- **Resuming**: The script caches verification results in `downloads/.verify_cache.tsv` to avoid re-scanning or re-downloading existing archives on subsequent runs.
+```bash
+uv run jupyter notebook docs/visualize_data.ipynb
+```
+
+## Project Structure
+
+```
+LightDFN/
+├── src/
+│   ├── lightdeepfilternet.py  # Model definition
+│   ├── modules.py             # Li-GRU and sub-modules
+│   ├── erb.py                 # ERB filterbank utilities
+│   ├── config.py              # ModelConfig dataclass
+│   ├── augmentations.py       # Audio augmentation pipeline
+│   ├── dataloader.py          # Dataset loader
+│   └── utils.py               # Shared utilities
+├── scripts/
+│   └── datasets/              # Download & preprocessing scripts
+├── docs/
+│   ├── download_datasets.md   # Detailed dataset documentation
+│   └── visualize_data.ipynb   # Data exploration notebook
+└── pyproject.toml
+```
 
 ## References
 
-- Original DeepFilterNet3: https://github.com/Rikorose/DeepFilterNet
-- Li-GRU (SpeechBrain): https://github.com/speechbrain/speechbrain
-- Dataset Logic & Guide: [sealad886/DeepFilterNet4](https://github.com/sealad886/DeepFilterNet4)
+- **DeepFilterNet3** — H. Schröter et al.: [github.com/Rikorose/DeepFilterNet](https://github.com/Rikorose/DeepFilterNet)
+- **Li-GRU** — M. Ravanelli et al. (SpeechBrain): [github.com/speechbrain/speechbrain](https://github.com/speechbrain/speechbrain)
+- **Dataset pipeline** — [sealad886/DeepFilterNet4](https://github.com/sealad886/DeepFilterNet4)

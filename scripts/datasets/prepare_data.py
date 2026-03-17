@@ -48,6 +48,8 @@ class PreProcessingDataset(Dataset):
         self.mono = mono
         self.compression = compression
 
+        logger.info(f"DTYPE: {self.dtype}, CODEC: {self.codec}, COMPRESSION: {self.compression}")
+
     def read(self, file_path: str) -> Tensor:
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
@@ -71,7 +73,7 @@ class PreProcessingDataset(Dataset):
             f"Got sample {fn} with unexpected shape {x.shape}"
         )
         n_samples = x.shape[1]
-        encoded = encode(x, self.sr, self.codec, self.compression)
+        encoded = encode(x, self.sr, self.dtype, self.codec, self.compression)
         return {"file_name": fn, "data": encoded, "n_samples": int(n_samples)}
 
     def __len__(self) -> int:
@@ -104,6 +106,10 @@ def write_to_h5(
         f.attrs["dtype"] = dtype
         f.attrs["sr"] = sr
         f.attrs["codec"] = codec
+
+        if dataset_type in f:
+            logger.info(f"Found group {dataset_type}. Deleting.")
+            del f[dataset_type]
 
         group = f.create_group(dataset_type)
 
@@ -158,7 +164,7 @@ def _check_file(path: str) -> str:
 
 def _load_audio_list(audio_files_list: str, num_workers: int) -> list[str]:
     list_path = Path(audio_files_list).resolve()
-    working_dir = list_path.parent
+    working_dir = Path(".").resolve()
 
     with open(list_path) as f:
         lines = [line.strip() for line in f if line.strip()]

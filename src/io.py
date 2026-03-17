@@ -38,7 +38,7 @@ def resample(audio: Tensor, sr: int, new_sr: int, method: str = "sinc_fast") -> 
 
 
 def encode(
-    x: Tensor, sr: int, codec: str, compression: Optional[int] = None
+    x: Tensor, sr: int, dtype: np.dtype, codec: str, compression: Optional[int] = None
 ) -> np.ndarray:
     match codec:
         case "vorbis":
@@ -59,6 +59,6 @@ def encode(
                 )
                 return np.array(list(tf.read()), dtype=np.uint8)
         case "pcm":
-            return x.numpy()
+            return x.numpy().astype(dtype)
         case _:
             raise NotImplementedError(f"Codec '{codec}' not supported.")

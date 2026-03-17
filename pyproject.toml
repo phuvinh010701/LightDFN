@@ -4,9 +4,11 @@ version = "0.1.0"
 description = "Lightweight audio noise suppression using Li-GRU - based on DeepFilterNet3"
 requires-python = ">=3.14"
 dependencies = [
+    "audb>=1.11.4",
     "torch>=2.10.0",
     "torchaudio>=2.10.0",
     "torchvision>=0.25.0",
+    "tqdm>=4.67.3",
 ]
 
 [[tool.uv.index]]

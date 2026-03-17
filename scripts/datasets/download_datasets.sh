@@ -1,3 +1,4 @@
+#Reference: https://github.com/sealad886/DeepFilterNet4
 #!/usr/bin/env bash
 set -euo pipefail
 
@@ -792,7 +793,7 @@ download_file() {
       USE_ARIA2=0
     fi
   fi
-  if [[ "${force_curl}" == "1" || "${USE_ARIA2}" != "1" ]]; then
+  if [[ "${force_curl}" == "1" || "${USE_ARIA2}" != "1" ]] || ! command -v aria2c >/dev/null 2>&1; then
     # NOTE: Token is passed via command line, which is visible via `ps` on multi-user systems.
     # For shared environments, consider using `gh release download` directly for GitHub releases.
     local auth_header=""

@@ -3,7 +3,7 @@
 import argparse
 import os
 import shutil
-import sys
+from typing import Any
 
 import audb
 
@@ -34,7 +34,9 @@ def normalize_version(version: str | None, name: str) -> str | None:
             if isinstance(db_versions, str):
                 db_versions = [db_versions]
             if version not in db_versions:
-                print(f"[warn] audb version '{version}' not found for {name}; using latest")
+                print(
+                    f"[warn] audb version '{version}' not found for {name}; using latest"
+                )
                 return None
     except Exception:
         pass
@@ -47,7 +49,7 @@ def call_load(name: str, root: str | None, version: str | None):
     cleanup_tmp(target_root)
 
     # Build kwargs for audb.load_to (preferred) or audb.load
-    load_kwargs: dict[str, str] = {"name": name}
+    load_kwargs: dict[str, Any] = {"name": name}
     if version:
         load_kwargs["version"] = version
 
@@ -70,14 +72,10 @@ def call_load(name: str, root: str | None, version: str | None):
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--name", default=os.environ.get("AUDB_NAME"))
-    parser.add_argument("--version", default=os.environ.get("AUDB_VERSION"))
-    parser.add_argument("--root", default=os.environ.get("AUDB_ROOT"))
+    parser.add_argument("--name", required=True)
+    parser.add_argument("--version")
+    parser.add_argument("--root")
     args = parser.parse_args()
-
-    if not args.name:
-        print("[error] AUDB_NAME is required", file=sys.stderr)
-        return 2
 
     version = normalize_version(args.version, args.name)
     call_load(args.name, args.root, version)

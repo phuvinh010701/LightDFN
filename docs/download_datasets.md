@@ -2,7 +2,54 @@
 
 This document outlines the dataset preparation pipeline for LightDFN. It details how datasets are downloaded, structured, filtered, and compiled into lists ready for training.
 
-## 1. Flow Download Datasets
+## 1. Step-by-Step Guide
+
+Follow these steps to download and prepare the datasets for training:
+
+### Step 1: Install Prerequisites
+Ensure you have the necessary system dependencies installed before running the script:
+- Basic utilities: `curl`, `wget`, `tar`, `unzip`, `zip`, `rsync`
+- **Recommended**: Download accelerator: `aria2`
+- (Optional): GitHub CLI (`gh`) for faster and authenticated downloads from GitHub.
+
+On Ubuntu/Debian, you can install the essentials via:
+```bash
+sudo apt-get update
+sudo apt-get install curl wget tar unzip zip rsync aria2
+```
+
+### Step 2: Execute the Download Script
+Configure the download behavior by setting environment variables before running the script. You must explicitly agree to the dataset licenses to proceed.
+
+```bash
+DATA_DIR="./datasets" \
+PROFILE="prototype" \
+DOWNLOAD=1 \
+AGREE_LICENSES=1 \
+INSTALL_AUDB=1 \
+USE_ARIA2=1 \
+uv run bash scripts/datasets/download_datasets.sh
+```
+
+**Environment Variables Explained:**
+- `DATA_DIR`: The target directory where all files (archives, raw audio, lists) will be stored.
+- `PROFILE`: Determines the size/scope of the dataset to be downloaded. 
+  - `"prototype"`: (Default) Downloads a smaller subset of data (VCTK, FSD50K, MUSAN, AIR, OpenAIR). Best for local testing and quick iterations.
+  - `"production"`: Downloads the full comprehensive dataset mix including full LibriSpeech and AcousticRooms. **Warning**: This requires hundreds of GBs of storage.
+- `DOWNLOAD`: Set to `1` to enable downloading dataset archives. If set to `0`, it will skip downloading and only attempt to recreate the file lists based on existing data.
+- `AGREE_LICENSES`: Must be set to `1` to confirm you have read and agreed to the original dataset licenses.
+- `INSTALL_AUDB`: Set to `1` to automatically install the `audb` Python library to fetch the AIR and OpenAIR datasets.
+- `USE_ARIA2`: Set to `1` to speed up large downloads using `aria2c` as an accelerator (if installed).
+
+### Step 3: Verify the Output
+Once the script completes, it will generate text files in the `datasets/lists/` directory containing the absolute paths to all valid audio files. Specifically, you should check for:
+- `clean_all.txt` (Combined Clean Speech)
+- `noise_music.txt` (Combined Noise & Music)
+- `rir_all.txt` (Combined Room Impulse Responses)
+
+If these files are generated and not empty, the dataset preparation was successful and you are ready to build the HDF5 dataset.
+
+## 2. Flow Download Datasets
 
 The `scripts/datasets/download_datasets.sh` script automates the retrieval and extraction of 6 distinct speech, noise, and Room Impulse Response (RIR) datasets. The execution flow for each dataset is as follows:
 
@@ -46,7 +93,7 @@ The `scripts/datasets/download_datasets.sh` script automates the retrieval and e
 - **Nested Extraction**: Extracted into `raw/AcousticRooms/`. The script detects that `single_channel_ir_1/` contains numerous smaller nested `.zip` files. It performs a secondary extraction to unpack these nested files in place.
 - **Processing (File List)**: Scans for all `*.wav` files -> `lists/acousticrooms_rir.txt`.
 
-## 2. Dataset Structure
+## 3. Dataset Structure
 
 After downloading and extracting, your base output directory (`/datasets`) will exhibit the following structure:
 
@@ -78,7 +125,7 @@ After downloading and extracting, your base output directory (`/datasets`) will 
     └── rir_all.txt          # Combined Room Impulse Responses (AIR + OpenAIR + AcousticRooms)
 ```
 
-## 3. License
+## 4. License
 
 LightDFN does not redistribute audio directly. You must accept and comply with the original licenses of the respective datasets:
 
@@ -91,7 +138,7 @@ LightDFN does not redistribute audio directly. You must accept and comply with t
 
 *Note: The script requires the flag `AGREE_LICENSES=1` to proceed, enforcing user acknowledgement of these terms.*
 
-## 4. Filter / Post Process
+## 5. Filter / Post Process
 
 Post-processing is crucial to ensure datasets meet quality and licensing requirements.
 
@@ -101,7 +148,7 @@ Because FSD50K aggregates clips from Freesound with mixed licenses, the pipeline
 2. It evaluates the `license` column for every audio clip.
 3. Only clips under strictly permissive licenses (**CC0** and **CC-BY**) are appended to the final `fsd50k_filtered.txt` manifest.
 
-## 5. Explore the Data
+## 6. Explore the Data
 
 To gain a better understanding of the datasets, check out the provided Jupyter Notebook: [docs/visualize_data.ipynb](visualize_data.ipynb). 
 

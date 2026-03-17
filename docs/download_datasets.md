@@ -18,12 +18,7 @@ sudo apt-get update
 sudo apt-get install curl wget tar unzip zip rsync aria2
 ```
 
-### Step 2: Choose a Profile
-The script supports different download profiles to manage dataset sizes:
-- **`prototype`**: (Default) Downloads a smaller subset of data (VCTK, FSD50K, MUSAN, AIR, OpenAIR). Best for local testing and quick iterations.
-- **`production`**: Downloads the full comprehensive dataset mix including full LibriSpeech and AcousticRooms. **Warning**: This requires hundreds of GBs of storage.
-
-### Step 3: Execute the Download Script
+### Step 2: Execute the Download Script
 Configure the download behavior by setting environment variables before running the script. You must explicitly agree to the dataset licenses to proceed.
 
 ```bash
@@ -39,14 +34,14 @@ uv run bash scripts/datasets/download_datasets.sh
 **Environment Variables Explained:**
 - `DATA_DIR`: The target directory where all files (archives, raw audio, lists) will be stored.
 - `PROFILE`: Determines the size/scope of the dataset to be downloaded. 
-  - Set to `"prototype"` for a smaller subset (good for local testing).
-  - Set to `"production"` to download the full comprehensive dataset mix (requires hundreds of GBs of storage).
+  - `"prototype"`: (Default) Downloads a smaller subset of data (VCTK, FSD50K, MUSAN, AIR, OpenAIR). Best for local testing and quick iterations.
+  - `"production"`: Downloads the full comprehensive dataset mix including full LibriSpeech and AcousticRooms. **Warning**: This requires hundreds of GBs of storage.
 - `DOWNLOAD`: Set to `1` to enable downloading dataset archives. If set to `0`, it will skip downloading and only attempt to recreate the file lists based on existing data.
 - `AGREE_LICENSES`: Must be set to `1` to confirm you have read and agreed to the original dataset licenses.
 - `INSTALL_AUDB`: Set to `1` to automatically install the `audb` Python library to fetch the AIR and OpenAIR datasets.
 - `USE_ARIA2`: Set to `1` to speed up large downloads using `aria2c` as an accelerator (if installed).
 
-### Step 4: Verify the Output
+### Step 3: Verify the Output
 Once the script completes, it will generate text files in the `datasets/lists/` directory containing the absolute paths to all valid audio files. Specifically, you should check for:
 - `clean_all.txt` (Combined Clean Speech)
 - `noise_music.txt` (Combined Noise & Music)

@@ -7,15 +7,15 @@ and eval_clips_info_FSD50K.json) provided by FSD50K.
 
 import argparse
 import json
-import os
 import re
+import os
 from pathlib import Path
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Filter FSD50K clips by license type")
-    parser.add_argument("--fsd50k-dir", default=os.environ.get("FSD50K_DIR"))
-    parser.add_argument("--list-dir", default=os.environ.get("LIST_DIR"))
+    parser.add_argument("--fsd50k-dir", required=True)
+    parser.add_argument("--list-dir", required=True)
     parser.add_argument(
         "--allowed-patterns",
         nargs="*",
@@ -40,11 +40,6 @@ def license_allowed(license_url: str, patterns: list[str]) -> bool:
 
 def main() -> int:
     args = parse_args()
-    if not args.fsd50k_dir:
-        raise SystemExit("FSD50K_DIR not set")
-    if not args.list_dir:
-        raise SystemExit("LIST_DIR not set")
-
     root = Path(args.fsd50k_dir)
     meta_dir = root / "FSD50K.metadata"
 

@@ -587,7 +587,7 @@ checksum_file() {
   elif command -v sha256sum >/dev/null 2>&1; then
     sha256sum "${path}" | awk '{print $1}'
   else
-    python3 "${ROOT_DIR}/scripts/datasets/sha256sum.py" "${path}"
+    uv run python "${ROOT_DIR}/scripts/datasets/sha256sum.py" "${path}"
   fi
 }
 
@@ -1145,7 +1145,7 @@ fsd50k_merge_and_unzip() {
     echo "[skip] already processed merged FSD50K archive: ${zip_base}" >&2
     return 0
   fi
-  python3 "${ROOT_DIR}/scripts/datasets/zip_merge_progress.py" \
+  uv run python "${ROOT_DIR}/scripts/datasets/zip_merge_progress.py" \
     --download-dir "${DOWNLOAD_DIR}" \
     --zip-base "${zip_base}"
   extract_archive "${merged_zip}" "${out_dir}"
@@ -1176,22 +1176,24 @@ download_fsd50k_split() {
 }
 
 maybe_install_audb() {
-  if python3 "${ROOT_DIR}/scripts/datasets/check_audb.py" >/dev/null 2>&1; then
+  if uv run python "${ROOT_DIR}/scripts/datasets/check_audb.py" >/dev/null 2>&1; then
     return 0
   fi
   if [[ "${INSTALL_AUDB}" == "1" ]]; then
-    if command -v uv >/dev/null 2>&1; then
-      uv pip install audb
-    else
-      python3 -m pip install audb
-    fi
+    uv pip install audb
   else
     return 1
   fi
 }
 
 download_with_audb() {
-  python3 "${ROOT_DIR}/scripts/datasets/audb_download.py"
+  local name="$1"
+  local version="$2"
+  local root="$3"
+  uv run python "${ROOT_DIR}/scripts/datasets/audb_download.py" \
+    --name "${name}" \
+    --version "${version}" \
+    --root "${root}"
 }
 
 # Optional downloads (opt-in)
@@ -1280,10 +1282,10 @@ if [[ "${DOWNLOAD}" == "1" ]]; then
     if maybe_install_audb; then
       mkdir -p "${AUDB_DIR}"
       if should_download "${DOWNLOAD_AIR}"; then
-        AUDB_NAME="air" AUDB_VERSION="${AIR_VERSION}" AUDB_ROOT="${AUDB_DIR}" download_with_audb
+        download_with_audb "air" "${AIR_VERSION}" "${AUDB_DIR}"
       fi
       if should_download "${DOWNLOAD_OPENAIR}"; then
-        AUDB_NAME="openair" AUDB_VERSION="${OPENAIR_VERSION}" AUDB_ROOT="${AUDB_DIR}" download_with_audb
+        download_with_audb "openair" "${OPENAIR_VERSION}" "${AUDB_DIR}"
       fi
     else
       echo "[skip] audb not installed; set INSTALL_AUDB=1 to auto-install." >&2
@@ -1380,9 +1382,9 @@ fi
 # - ${FSD50K_DIR}/FSD50K.dev_audio/ and/or FSD50K.eval_audio/
 # Update CSV/column names as needed after download.
 if require_dir "FSD50K" "${FSD50K_DIR}"; then
-  export FSD50K_DIR
-  export LIST_DIR
-  python3 "${ROOT_DIR}/scripts/datasets/fsd50k_filter.py"
+  uv run python "${ROOT_DIR}/scripts/datasets/fsd50k_filter.py" \
+    --fsd50k-dir "${FSD50K_DIR}" \
+    --list-dir "${LIST_DIR}"
 fi
 
 # RIR lists

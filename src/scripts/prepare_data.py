@@ -12,11 +12,12 @@ import h5py as h5
 import numpy as np
 import torch
 import torchaudio
+import soundfile as sf
 from loguru import logger
 from torch import Tensor
 from torch.utils.data import DataLoader, Dataset
 
-from constants import AUDIO_DATASET_TYPES
+from src.constants import AUDIO_DATASET_TYPES
 from src.io import encode, resample
 
 
@@ -50,8 +51,8 @@ class PreProcessingDataset(Dataset):
     def read(self, file_path: str) -> Tensor:
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
-            meta = torchaudio.info(file_path)
-            if meta.sample_rate != self.sr:
+            meta = sf.info(file_path)
+            if meta.samplerate != self.sr:
                 x, sr = torchaudio.load(file_path, normalize=True)
                 x = resample(x, sr, self.sr, method="kaiser_best")
             else:
@@ -228,7 +229,7 @@ def main() -> None:
 
     write_to_h5(
         output_file_name=args.hdf5_db,
-        ds_type=args.type,
+        dataset_type=args.type,
         audio_file_names=files,
         sr=args.sr,
         max_freq=args.max_freq,

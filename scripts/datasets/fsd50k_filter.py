@@ -1,4 +1,4 @@
-#Reference: https://github.com/sealad886/DeepFilterNet4
+# Reference: https://github.com/sealad886/DeepFilterNet4
 #!/usr/bin/env python3
 """Filter FSD50K audio files by license (CC0/CC-BY only by default).
 
@@ -8,8 +8,8 @@ and eval_clips_info_FSD50K.json) provided by FSD50K.
 
 import argparse
 import json
-import re
 import os
+import re
 from pathlib import Path
 
 

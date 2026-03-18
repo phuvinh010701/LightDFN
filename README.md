@@ -33,7 +33,7 @@ uv sync
 
 ## Dataset Setup
 
-LightDFN uses 6 corpora covering clean speech, noise, music, and room impulse responses (RIRs). An automated shell script handles downloading, extraction, license filtering, and manifest generation.
+LightDFN uses six corpora spanning clean speech, noise, music, and room impulse responses (RIRs). The dataset tooling handles download, extraction, license-aware filtering, and manifest generation.
 
 ### Datasets
 
@@ -49,17 +49,33 @@ LightDFN uses 6 corpora covering clean speech, noise, music, and room impulse re
 ### Download
 
 ```bash
-DATA_DIR="/path/to/data" \
-PROFILE=prototype \
-DOWNLOAD=1 \
-AGREE_LICENSES=1 \
-INSTALL_AUDB=1 \
-uv run bash scripts/datasets/download_datasets.sh
+./script/datasets/download_datasets.sh \
+  --data-dir "./datasets/" \
+  --profile prototype \
+  --use-aria2 \
+  --aria2-max-concurrent 4 \
+  --aria2-conn 8 \
+  --resume \
+  --install-audb
 ```
 
-Set `PROFILE=production` for the full training set. The `AGREE_LICENSES=1` flag is required and confirms acceptance of each dataset's original license terms.
+Use `--profile production` for the full training set. `--agree-licenses` is required and confirms acceptance of each dataset's original license terms.
 
-For a full breakdown of the download pipeline, dataset structure, filtering logic, and license details, see [docs/download_datasets.md](docs/download_datasets.md).
+For the full download workflow, dataset layout, filtering rules, and licensing notes, see `docs/download_datasets.md`.
+
+### Preprocessing
+
+After the raw datasets and manifests are available, build the training HDF5 files with:
+
+```bash
+scripts/datasets/build_hdf5.sh \
+  --data-dir "./datasets/" \
+  --num-workers 4 \
+  --dtype float32 \
+  --profile prototype
+```
+
+For preprocessing details, profile behavior, and output layout, see `docs/preprocess_data.md`.
 
 ### Exploring the Data
 
@@ -85,6 +101,7 @@ LightDFN/
 │   └── datasets/              # Download & preprocessing scripts
 ├── docs/
 │   ├── download_datasets.md   # Detailed dataset documentation
+│   ├── preprocess_data.md     # Preprocessing workflow documentation
 │   └── visualize_data.ipynb   # Data exploration notebook
 └── pyproject.toml
 ```

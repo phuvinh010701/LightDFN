@@ -1,10 +1,27 @@
 # Download Datasets
 
-This document outlines the dataset preparation pipeline for LightDFN. It details how datasets are downloaded, structured, filtered, and compiled into lists ready for training.
+This document describes the dataset acquisition workflow for LightDFN. The pipeline downloads the required corpora, extracts them into a consistent directory layout, applies post-processing where necessary, and generates manifest files for preprocessing and training.
 
-## 1. Flow Download Datasets
+## Command
 
-The `scripts/datasets/download_datasets.sh` script automates the retrieval and extraction of 6 distinct speech, noise, and Room Impulse Response (RIR) datasets. The execution flow for each dataset is as follows:
+Use the repository script directly with CLI flags:
+
+```bash
+./script/datasets/download_datasets.sh \
+  --data-dir "./datasets/" \
+  --profile prototype \
+  --use-aria2 \
+  --aria2-max-concurrent 4 \
+  --aria2-conn 8 \
+  --resume \
+  --install-audb
+```
+
+Use `--profile production` for the full corpus mix. If license confirmation is not already enabled in your local defaults, add `--agree-licenses`.
+
+## Workflow
+
+The `scripts/datasets/download_datasets.sh` script orchestrates six datasets covering clean speech, background noise, music, and room impulse responses.
 
 ### VCTK (Clean Speech)
 - **Download**: Fetches `VCTK-Corpus-0.92.zip` from `datashare.is.ed.ac.uk`.
@@ -13,8 +30,8 @@ The `scripts/datasets/download_datasets.sh` script automates the retrieval and e
 
 ### LibriSpeech (Clean Speech)
 - **Download**: Retrieves archives from `openslr.org/resources/12/`.
-  - `PROFILE=prototype`: **Skipped entirely** (does not download).
-  - `PROFILE=production`: Downloads the full dataset (`train-clean-100`, `train-clean-360`, `train-other-500`, `dev-clean`, `dev-other`, `test-clean`, `test-other`).
+  - `--profile prototype`: skipped by default.
+  - `--profile production`: downloads the full dataset (`train-clean-100`, `train-clean-360`, `train-other-500`, `dev-clean`, `dev-other`, `test-clean`, `test-other`).
 - **Extraction**: Extracts `.tar.gz` files directly into `raw/LibriSpeech/`.
 - **Processing (File List)**: Scans for `*.flac` files and saves paths to `lists/librispeech_clean.txt`.
 
@@ -41,14 +58,14 @@ The `scripts/datasets/download_datasets.sh` script automates the retrieval and e
 
 ### AcousticRooms (Room Impulse Responses - Reverb)
 - **Download**: Fetches `single_channel_ir.zip` and `metadata.zip` from the [facebookresearch/AcousticRooms](https://github.com/facebookresearch/AcousticRooms) repository.
-  - `PROFILE=prototype`: **Skipped entirely** (does not download).
-  - `PROFILE=production`: Downloads the dataset.
+  - `--profile prototype`: skipped by default.
+  - `--profile production`: downloads the dataset.
 - **Nested Extraction**: Extracted into `raw/AcousticRooms/`. The script detects that `single_channel_ir_1/` contains numerous smaller nested `.zip` files. It performs a secondary extraction to unpack these nested files in place.
 - **Processing (File List)**: Scans for all `*.wav` files -> `lists/acousticrooms_rir.txt`.
 
-## 2. Dataset Structure
+## Directory Layout
 
-After downloading and extracting, your base output directory (`/datasets`) will exhibit the following structure:
+After download and extraction, the base output directory typically looks like this:
 
 ```text
 /datasets/
@@ -78,7 +95,7 @@ After downloading and extracting, your base output directory (`/datasets`) will 
     └── rir_all.txt          # Combined Room Impulse Responses (AIR + OpenAIR + AcousticRooms)
 ```
 
-## 3. License
+## Licensing
 
 LightDFN does not redistribute audio directly. You must accept and comply with the original licenses of the respective datasets:
 
@@ -89,21 +106,23 @@ LightDFN does not redistribute audio directly. You must accept and comply with t
 - **AIR**/**OpenAIR**: MIT License (see `raw/audb/db.yaml`)
 - **AcousticRooms**: [License from facebookresearch/AcousticRooms](https://github.com/facebookresearch/AcousticRooms/blob/clean-main/LICENSE)
 
-*Note: The script requires the flag `AGREE_LICENSES=1` to proceed, enforcing user acknowledgement of these terms.*
+The download script requires `--agree-licenses` before it will fetch any dataset.
 
-## 4. Filter / Post Process
+## Filtering And Post-Processing
 
 Post-processing is crucial to ensure datasets meet quality and licensing requirements.
 
 **FSD50K License Filtering (`fsd50k_filter.py`)**
-Because FSD50K aggregates clips from Freesound with mixed licenses, the pipeline cannot blindly use all audio files. 
+Because FSD50K aggregates clips from Freesound with mixed licenses, the pipeline cannot use all audio files without filtering.
 1. The script accesses `dev_clips_info_FSD50K.json`/`.csv` and `eval_clips_info_FSD50K.json`/`.csv` in the extracted metadata directory.
 2. It evaluates the `license` column for every audio clip.
 3. Only clips under strictly permissive licenses (**CC0** and **CC-BY**) are appended to the final `fsd50k_filtered.txt` manifest.
 
-## 5. Explore the Data
+The helper scripts are invoked with explicit CLI flags, including `--fsd50k-dir`, `--list-dir`, `--name`, `--version`, and `--root`, so the documented workflow does not depend on environment variables.
 
-To gain a better understanding of the datasets, check out the provided Jupyter Notebook: [docs/visualize_data.ipynb](visualize_data.ipynb). 
+## Explore The Data
+
+To inspect the prepared datasets interactively, open `docs/visualize_data.ipynb`.
 
 This notebook allows you to:
 - Visually inspect the structure and metadata of the filtered data.

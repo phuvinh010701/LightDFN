@@ -9,14 +9,6 @@ from torch.nn.parameter import Parameter
 from typing_extensions import Final
 
 
-def get_device():
-    """Get the device to use for computations."""
-    if torch.cuda.is_available():
-        return torch.device("cuda:0")
-    else:
-        return torch.device("cpu")
-
-
 def as_complex(x: Tensor):
     """Convert real tensor with last dim 2 to complex tensor."""
     if torch.is_complex(x):
@@ -35,6 +27,16 @@ def as_real(x: Tensor):
     if torch.is_complex(x):
         return torch.view_as_real(x)
     return x
+
+
+class Add(nn.Module):
+    def forward(self, a, b):
+        return a + b
+
+
+class Concat(nn.Module):
+    def forward(self, a, b):
+        return torch.cat((a, b), dim=-1)
 
 
 class Conv2dNormAct(nn.Sequential):

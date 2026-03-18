@@ -11,35 +11,27 @@ import torch
 from torch import Tensor, nn
 from typing_extensions import Final
 
-from src.config import ModelConfig, config
-from src.erb import get_erb_filterbanks
-from src.modules import (
+from src.configs.config import ModelConfig
+from src.model.modules import (
+    Add,
+    Concat,
     Conv2dNormAct,
     ConvTranspose2dNormAct,
     GroupedLinearEinsum,
     Mask,
     SqueezedLiGRU_S,
-    get_device,
 )
+from src.utils.erb import get_erb_filterbanks
+from src.utils.io import get_device
 
 PI = 3.1415926535897932384626433
 eps = 1e-12
 
 
-class Add(nn.Module):
-    def forward(self, a, b):
-        return a + b
-
-
-class Concat(nn.Module):
-    def forward(self, a, b):
-        return torch.cat((a, b), dim=-1)
-
-
 class LightEncoder(nn.Module):
     """Encoder module with Li-GRU for LightDeepFilterNet."""
 
-    def __init__(self, config: ModelConfig = config):
+    def __init__(self, config: ModelConfig):
         super().__init__()
         assert config.nb_erb % 4 == 0, "erb_bins should be divisible by 4"
 
@@ -144,7 +136,7 @@ class LightEncoder(nn.Module):
 class LightErbDecoder(nn.Module):
     """ERB Decoder module with Li-GRU for LightDeepFilterNet."""
 
-    def __init__(self, config: ModelConfig = config):
+    def __init__(self, config: ModelConfig):
         super().__init__()
         assert config.nb_erb % 8 == 0, "erb_bins should be divisible by 8"
 
@@ -376,7 +368,7 @@ class LightDeepFilterNet(nn.Module):
 
     def __init__(
         self,
-        config: ModelConfig = config,
+        config: ModelConfig,
         erb_fb_tensor: Optional[Tensor] = None,
         erb_inv_fb_tensor: Optional[Tensor] = None,
         run_df: bool = True,
@@ -408,8 +400,8 @@ class LightDeepFilterNet(nn.Module):
 
         # Initialize ERB filterbanks if not provided
         self.register_buffer("erb_fb", erb_fb_tensor)
-        self.enc = LightEncoder()
-        self.erb_dec = LightErbDecoder()
+        self.enc = LightEncoder(config)
+        self.erb_dec = LightErbDecoder(config)
         self.mask = Mask(erb_inv_fb_tensor)
         self.erb_inv_fb = erb_inv_fb_tensor
         self.post_filter = config.mask_pf
@@ -508,17 +500,17 @@ class LightDeepFilterNet(nn.Module):
         return spec_e, m, lsnr, df_coefs
 
 
-def init_model(run_df: bool = True, train_mask: bool = True):
+def init_model(model_config: ModelConfig, run_df: bool = True, train_mask: bool = True):
     # Generate proper ERB filterbanks
     erb_fb_tensor, erb_inv_fb_tensor = get_erb_filterbanks(
-        sr=config.sr,
-        fft_size=config.fft_size,
-        nb_erb=config.nb_erb,
-        min_nb_freqs=config.min_nb_freqs,
+        sr=model_config.sr,
+        fft_size=model_config.fft_size,
+        nb_erb=model_config.nb_erb,
+        min_nb_freqs=model_config.min_nb_freqs,
     )
 
     model = LightDeepFilterNet(
-        config, erb_fb_tensor, erb_inv_fb_tensor, run_df, train_mask
+        model_config, erb_fb_tensor, erb_inv_fb_tensor, run_df, train_mask
     )
     return model.to(device=get_device())
 
@@ -526,9 +518,12 @@ def init_model(run_df: bool = True, train_mask: bool = True):
 if __name__ == "__main__":
     """Simple test for LightDeepFilterNet forward pass."""
     # Init model
-    from src.utils import count_parameters
+    from src.configs.config import load_config
+    from src.utils.utils import count_parameters
 
-    model = init_model()
+    model_config, _ = load_config()
+
+    model = init_model(model_config)
     model.eval()
     device = get_device()
 
@@ -542,7 +537,7 @@ if __name__ == "__main__":
     with torch.no_grad():
         enhanced_spec, erb_feat, lsnr, df_coefs = model(spec, feat_erb, feat_spec)
 
-    print("✅ Forward pass OK")
+    print("Forward pass OK")
     print(f"   enhanced_spec: {list(enhanced_spec.shape)}")
     print(f"   erb_feat: {list(erb_feat.shape)}")
     print(f"   lsnr: {list(lsnr.shape)}")

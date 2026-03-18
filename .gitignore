@@ -27,3 +27,8 @@ wheels/
 .idea/
 *.swp
 *.swo
+
+datasets/raw/
+datasets/lists/
+datasets/hdf5/
+datasets/downloads/

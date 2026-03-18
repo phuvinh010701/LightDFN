@@ -18,7 +18,7 @@ from torch import Tensor
 from torch.utils.data import DataLoader, Dataset
 
 from src.constants import AUDIO_DATASET_TYPES
-from src.io import encode, resample
+from src.utils.io import encode, resample
 
 
 class PreProcessingDataset(Dataset):

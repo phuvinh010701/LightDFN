@@ -1,101 +1,16 @@
 import os
-from abc import ABC, abstractmethod
-from typing import Optional, Union
+from typing import Optional
 
 import numpy as np
 import torch
 from scipy import signal as scipy_signal
 from torch import Tensor
+from torch_audiomentations import Compose
+from torch_audiomentations.core.composition import ObjectDict
+from torch_audiomentations.core.transforms_interface import BaseWaveformTransform
 
-try:
-    from .io import resample
-except ImportError:
-    # For standalone testing
-    import sys
-
-    sys.path.insert(0, os.path.dirname(__file__))
-    from io import resample
-
-
-# ============================================================================
-# Base Augmentation Class
-# ============================================================================
-
-
-class BaseAugmentation(ABC):
-    """Base class for all augmentation transforms.
-
-    Handles probability-based application and seeding.
-    """
-
-    def __init__(self, prob: float, seed: Optional[int] = None):
-        """Initialize augmentation.
-
-        Args:
-            prob: Probability of applying this augmentation (0.0 to 1.0)
-            seed: Random seed for reproducibility (optional)
-        """
-        self.prob = prob
-        self.rng = np.random.default_rng(seed)
-
-    def __call__(
-        self, audio: Union[np.ndarray, Tensor], sample_rate: Optional[int] = None
-    ) -> Union[np.ndarray, Tensor]:
-        """Apply augmentation with probability self.prob.
-
-        Args:
-            audio: Audio array of shape (channels, samples) or (samples,)
-            sample_rate: Sample rate in Hz (required for some augmentations)
-
-        Returns:
-            Augmented audio with same shape and type as input
-        """
-        # Check probability
-        if self.prob == 0.0:
-            return audio
-
-        if self.prob < 1.0 and self.rng.uniform(0.0, 1.0) > self.prob:
-            return audio
-
-        # Convert to numpy if needed
-        is_tensor = isinstance(audio, Tensor)
-        if is_tensor:
-            device = audio.device
-            dtype = audio.dtype
-            audio_np = audio.detach().cpu().numpy()
-        else:
-            audio_np = audio.copy()
-
-        # Apply augmentation
-        try:
-            audio_np = self.apply(audio_np, sample_rate)
-        except Exception as e:
-            # On error, return original audio (graceful degradation)
-            print(f"Warning: {self.__class__.__name__} failed: {e}")
-            return audio
-
-        # Convert back to tensor if needed
-        if is_tensor:
-            return torch.from_numpy(audio_np).to(device=device, dtype=dtype)
-        return audio_np
-
-    @abstractmethod
-    def apply(self, audio: np.ndarray, sample_rate: Optional[int] = None) -> np.ndarray:
-        """Apply the actual augmentation (to be implemented by subclasses).
-
-        Args:
-            audio: Numpy audio array
-            sample_rate: Sample rate in Hz
-
-        Returns:
-            Augmented audio array
-        """
-        pass
-
-
-# ============================================================================
-# Biquad Filter Infrastructure
-# ============================================================================
+from src.configs.config import AugmentationConfig
+from src.utils.io import resample
 
 
 def biquad_filter_inplace(audio: np.ndarray, b: np.ndarray, a: np.ndarray) -> None:
@@ -131,34 +46,30 @@ def biquad_filter_inplace(audio: np.ndarray, b: np.ndarray, a: np.ndarray) -> No
         w1 = w0
 
 
-def biquad_norm_inplace(
-    audio: np.ndarray, mem: np.ndarray, b: np.ndarray, a: np.ndarray
-) -> None:
-    """Apply normalized biquad filter (RNNoise/PercepNet style).
-
-    Port of DeepFilterNet RandLFilt biquad implementation.
-    Uses 2-coefficient normalized form.
-
-    Difference equation:
-        y[n] = b[0]*x[n] + b[1]*x[n-1] - a[0]*y[n-1] - a[1]*y[n-2]
-
-    Args:
-        audio: Audio array of shape (samples,) - modified in-place
-        mem: Memory state [2] - updated in-place
-        b: Feedforward coefficients [b0, b1]
-        a: Feedback coefficients [a0, a1]
+def biquad_norm(x: Tensor, b: Tensor, a: Tensor) -> Tensor:
     """
-    for i in range(len(audio)):
-        x_curr = audio[i]
+    x: (T,)
+    b: (2,) -> [b0, b1]
+    a: (2,) -> [a0, a1]
+    """
+    T = x.shape[0]
+    y = torch.zeros_like(x)
 
-        # Apply filter
-        y = b[0] * x_curr + b[1] * mem[0] - a[0] * mem[1] - a[1] * mem[0]
+    y_prev1 = torch.tensor(0.0, device=x.device, dtype=x.dtype)
+    y_prev2 = torch.tensor(0.0, device=x.device, dtype=x.dtype)
+    x_prev1 = torch.tensor(0.0, device=x.device, dtype=x.dtype)
 
-        # Update memory: shift and store
-        mem[1] = mem[0]  # y[n-2] = y[n-1]
-        mem[0] = y  # y[n-1] = y[n]
+    for t in range(T):
+        x_curr = x[t]
+        y_curr = b[0] * x_curr + b[1] * x_prev1 - a[0] * y_prev1 - a[1] * y_prev2
 
-        audio[i] = y
+        y[t] = y_curr
+
+        x_prev1 = x_curr
+        y_prev2 = y_prev1
+        y_prev1 = y_curr
+
+    return y
 
 
 def lowpass_coefs(
@@ -374,44 +285,41 @@ def notch_coefs(
     return b, a
 
 
-# ============================================================================
-# Augmentation 1: RandRemoveDc
-# ============================================================================
-
-
-class RandRemoveDc(BaseAugmentation):
+class RandRemoveDc(BaseWaveformTransform):
     """Remove DC offset by subtracting mean.
-
-    Port of DeepFilterNet libDF/src/augmentations.rs:RandRemoveDc
 
     Simple mean subtraction: y[n] = x[n] - mean(x)
     """
 
-    def __init__(self, prob: float = 0.25, seed: Optional[int] = None):
-        super().__init__(prob, seed)
+    def __init__(self, p: float = 0.25, sample_rate: int = 48000):
+        super().__init__(p=p, sample_rate=sample_rate)
 
-    def apply(self, audio: np.ndarray, sample_rate: Optional[int] = None) -> np.ndarray:
+    def apply_transform(self, samples: Tensor) -> Tensor:
         """Remove DC offset from audio.
 
         Args:
-            audio: Audio array of shape (channels, samples) or (samples,)
+            samples: Audio array of shape (batch_size, channels, samples)
 
         Returns:
-            Audio with DC offset removed
+            Tensor with DC offset removed
         """
-        mean = np.mean(audio)
-        return audio - mean
+        mean = samples.mean(dim=-1, keepdim=True)
+        return samples - mean
 
 
-# ============================================================================
-# Augmentation 2: RandLFilt
-# ============================================================================
+class BaseAugmentation(BaseWaveformTransform):
+    """Base augmentation class."""
+
+    def __init__(self, prob: float, seed: Optional[int] = None):
+        super().__init__(prob=prob, seed=seed)
+
+    def apply_transform(self, samples: Tensor) -> ObjectDict:
+        """Apply augmentation."""
+        return super().apply_transform(samples)
 
 
-class RandLFilt(BaseAugmentation):
+class RandLFilt(BaseWaveformTransform):
     """Random low/high-pass filtering using normalized biquad.
-
-    Port of DeepFilterNet libDF/src/augmentations.rs:RandLFilt
 
     Applies second-order biquad with coefficients sampled from ranges.
     Adopted from RNNoise/PercepNet implementations.
@@ -419,10 +327,9 @@ class RandLFilt(BaseAugmentation):
 
     def __init__(
         self,
-        prob: float = 0.5,
+        p: float = 0.5,
         a_range: tuple[float, float] = (-3.0 / 8.0, 3.0 / 8.0),
         b_range: tuple[float, float] = (-3.0 / 8.0, 3.0 / 8.0),
-        seed: Optional[int] = None,
     ):
         """Initialize RandLFilt.
 
@@ -432,43 +339,40 @@ class RandLFilt(BaseAugmentation):
             b_range: Feedforward coefficient range (min, max)
             seed: Random seed
         """
-        super().__init__(prob, seed)
+        super().__init__(p=p)
         self.a_range = a_range
         self.b_range = b_range
 
-    def apply(self, audio: np.ndarray, sample_rate: Optional[int] = None) -> np.ndarray:
+    def apply_transform(self, samples: Tensor) -> Tensor:
         """Apply random normalized biquad filter.
 
         Args:
-            audio: Audio of shape (channels, samples) or (samples,)
+            samples: Audio of shape (batch_size, channels, samples)
 
         Returns:
             Filtered audio
         """
-        # Ensure 2D
-        if audio.ndim == 1:
-            audio = audio[np.newaxis, :]
-            squeeze = True
-        else:
-            squeeze = False
+        B, C, _ = samples.shape
 
-        # Sample coefficients
-        a = self.rng.uniform(self.a_range[0], self.a_range[1], size=2).astype(
-            np.float32
-        )
-        b = self.rng.uniform(self.b_range[0], self.b_range[1], size=2).astype(
-            np.float32
-        )
+        a = torch.distributions.Uniform(
+            low=torch.tensor(self.a_range[0], dtype=torch.float32),
+            high=torch.tensor(self.a_range[1], dtype=torch.float32),
+        ).sample((B, 2))
 
-        # Apply per channel
-        for ch_idx in range(audio.shape[0]):
-            mem = np.zeros(2, dtype=np.float32)
-            biquad_norm_inplace(audio[ch_idx], mem, b, a)
+        b = torch.distributions.Uniform(
+            low=torch.tensor(self.b_range[0], dtype=torch.float32),
+            high=torch.tensor(self.b_range[1], dtype=torch.float32),
+        ).sample((B, 2))
 
-        if squeeze:
-            audio = audio.squeeze(0)
+        out = samples.clone()
 
-        return audio
+        for i in range(B):
+            a_i = a[i]
+            b_i = b[i]
+            for ch in range(C):
+                out[i, ch] = biquad_norm(out[i, ch], b_i, a_i)
+
+        return out
 
 
 # ============================================================================
@@ -1169,75 +1073,31 @@ class NoiseGenerator(BaseAugmentation):
 # ============================================================================
 
 
-class Compose:
-    """Compose multiple augmentations into a pipeline.
-
-    Port of DeepFilterNet libDF/src/augmentations.rs:Compose
-    """
-
-    def __init__(self, transforms: list[BaseAugmentation]):
-        """Initialize Compose.
-
-        Args:
-            transforms: List of augmentation transforms
-        """
-        self.transforms = transforms
-
-    def __call__(
-        self, audio: Union[np.ndarray, Tensor], sample_rate: Optional[int] = None
-    ) -> Union[np.ndarray, Tensor]:
-        """Apply all transforms in sequence.
-
-        Args:
-            audio: Audio array
-            sample_rate: Sample rate in Hz
-
-        Returns:
-            Augmented audio
-        """
-        for transform in self.transforms:
-            audio = transform(audio, sample_rate)
-        return audio
-
-
-# ============================================================================
-# Factory Functions with Environment Variable Support
-# ============================================================================
-
-
 def get_env_float(key: str, default: float) -> float:
     """Get float from environment variable or use default."""
     return float(os.environ.get(key, default))
 
 
-def get_speech_augmentations(seed: Optional[int] = None) -> Compose:
+def get_speech_augmentations(
+    augmentation_config: AugmentationConfig,
+    sample_rate: int = 48000,
+    seed: Optional[int] = None,
+) -> Compose:
     """Get speech augmentation pipeline.
-
-    Supports environment variables:
-    - DF_P_REMOVE_DC: Probability for DC removal (default: 0.25)
-    - DF_P_LFILT: Probability for random filtering (default: 0.3)
-    - DF_P_BIQUAD: Probability for biquad filter (default: 0.3)
-    - DF_P_RESAMPLE: Probability for resampling (default: 0.2)
-    - DF_P_CLIPPING: Probability for clipping (default: 0.1)
 
     Returns:
         Compose object with speech augmentations
     """
-    p_remove_dc = get_env_float("DF_P_REMOVE_DC", 0.25)
-    p_lfilt = get_env_float("DF_P_LFILT", 0.3)
-    p_biquad = get_env_float("DF_P_BIQUAD", 0.3)
-    p_resample = get_env_float("DF_P_RESAMPLE", 0.2)
-    p_clipping = get_env_float("DF_P_CLIPPING", 0.1)
 
     transforms = [
-        RandRemoveDc(prob=p_remove_dc, seed=seed),
-        RandLFilt(prob=p_lfilt, seed=seed),
-        RandBiquadFilter(prob=p_biquad, seed=seed),
-        RandResample(prob=p_resample, seed=seed),
-        RandClipping(prob=p_clipping, seed=seed),
+        RandRemoveDc(p=augmentation_config.p_remove_dc, sample_rate=sample_rate),
+        RandLFilt(p=augmentation_config.p_lfilt),
+        # RandBiquadFilter(prob=augmentation_config.p_biquad, seed=seed),
+        # RandResample(prob=augmentation_config.p_resample, seed=seed),
+        # RandClipping(prob=augmentation_config.p_clipping, seed=seed),
     ]
 
-    return Compose(transforms)
+    return Compose(transforms, output_type="tensor")
 
 
 def get_noise_augmentations(seed: Optional[int] = None) -> Compose:

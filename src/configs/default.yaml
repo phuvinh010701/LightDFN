@@ -1,0 +1,68 @@
+model:
+  # Audio parameters
+  sr: 48000           # Sample rate
+  fft_size: 960       # FFT size in samples
+  hop_size: 480       # STFT hop size in samples
+  nb_erb: 32          # Number of ERB bands
+  nb_df: 96           # Number of DF bins (applied from 0 to nb_df-1)
+
+  # Normalization
+  norm_tau: 1.0       # Normalization decay factor
+
+  # LSNR (Local SNR) parameters
+  lsnr_max: 35        # LSNR maximum value (ground truth truncation)
+  lsnr_min: -15       # LSNR minimum value (ground truth truncation)
+
+  # ERB parameters
+  min_nb_freqs: 2     # Minimum frequency bins per ERB band
+
+  # DF parameters
+  df_order: 5         # Deep filtering order
+  df_lookahead: 2     # Deep filtering look-ahead
+  pad_mode: "output"  # Padding mode: 'input' or 'output'
+
+  # Convolution parameters
+  conv_lookahead: 2
+  conv_ch: 64
+  conv_depthwise: true
+  convt_depthwise: false
+  conv_kernel: [1, 3]
+  convt_kernel: [1, 3]
+  conv_kernel_inp: [3, 3]
+
+  # Embedding/Encoder GRU parameters
+  emb_hidden_dim: 256
+  emb_num_layers: 3
+  emb_gru_skip: "none"
+  emb_gru_skip_enc: "none"
+
+  # Deep Filtering decoder GRU parameters
+  df_hidden_dim: 256
+  df_num_layers: 2
+  df_gru_skip: "groupedlinear"
+  df_pathway_kernel_size_t: 5
+
+  # Linear layer parameters
+  lin_groups: 16
+  enc_lin_groups: 32
+
+  # Other architecture parameters
+  enc_concat: false
+  df_n_iter: 1
+
+  # Post-processing
+  mask_pf: false
+  pf_beta: 0.02
+  lsnr_dropout: false
+
+  # Li-GRU specific
+  batch_size: 1
+
+augmentation:
+  p_remove_dc: 0.25
+  p_lfilt: 0.30
+  p_biquad: 0.30
+  p_resample: 0.20
+  p_clipping: 0.10
+  p_noise_clipping: 0.15
+  p_noise_distortion: 0.10

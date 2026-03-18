@@ -1,5 +1,3 @@
-from typing import Optional
-
 import h5py
 import numpy as np
 
@@ -11,7 +9,7 @@ class Hdf5Dataset:
         self,
         file_path: str,
         sampling_factor: float = 1.0,
-        max_len_s: Optional[float] = None,
+        max_len_s: float | None = None,
     ):
         super().__init__()
 

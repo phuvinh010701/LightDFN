@@ -1,8 +1,18 @@
 from tempfile import NamedTemporaryFile
 from typing import Any, Optional
-from torch import Tensor
-import torchaudio
+
 import numpy as np
+import torch
+import torchaudio
+from torch import Tensor
+
+
+def get_device():
+    """Get the device to use for computations."""
+    if torch.cuda.is_available():
+        return torch.device("cuda:0")
+    else:
+        return torch.device("cpu")
 
 
 def get_resample_params(method: str = "sinc_fast") -> dict[str, Any]:

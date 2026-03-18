@@ -59,6 +59,8 @@ def encode(
                 )
                 return np.array(list(tf.read()), dtype=np.uint8)
         case "pcm":
+            if dtype == np.int16:
+                x = x * 32767.0
             return x.numpy().astype(dtype)
         case _:
             raise NotImplementedError(f"Codec '{codec}' not supported.")

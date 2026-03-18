@@ -81,6 +81,15 @@ copy_dataset_cfg() {
   require_file "Dataset config template" "${template_path}"
   mkdir -p "$(dirname "${output_path}")"
 
+  local template_real=""
+  local output_real=""
+  template_real="$(readlink -f "${template_path}" 2>/dev/null || realpath "${template_path}" 2>/dev/null || echo "${template_path}")"
+  output_real="$(readlink -f "${output_path}" 2>/dev/null || realpath "${output_path}" 2>/dev/null || echo "${output_path}")"
+  if [[ "${template_real}" == "${output_real}" ]]; then
+    info "dataset config already in place: ${output_path}"
+    return 0
+  fi
+
   if [[ "${force_copy}" == "1" || ! -f "${output_path}" ]]; then
     cp "${template_path}" "${output_path}"
     info "wrote dataset config: ${output_path}"
@@ -190,6 +199,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 DATA_DIR="${CLI_DATA_DIR:-${DATA_DIR:-${DEFAULT_DATA_DIR}}}"
+DATA_DIR="${DATA_DIR%/}"
 LIST_DIR="${CLI_LIST_DIR:-${LIST_DIR:-${DATA_DIR}/lists}}"
 HDF5_DIR="${CLI_HDF5_DIR:-${HDF5_DIR:-${DATA_DIR}/hdf5}}"
 PROFILE="${CLI_PROFILE:-${PROFILE:-prototype}}"
@@ -248,6 +258,8 @@ require_file "Noise list" "${NOISE_LIST}"
 require_file "RIR list" "${RIR_LIST}"
 
 mkdir -p "${HDF5_DIR}"
+
+cd "${ROOT_DIR}"
 
 SUFFIX=""
 ACTIVE_CLEAN_LIST="${CLEAN_LIST}"

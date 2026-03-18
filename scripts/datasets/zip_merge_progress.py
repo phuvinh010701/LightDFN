@@ -1,4 +1,4 @@
-#Reference: https://github.com/sealad886/DeepFilterNet4
+# Reference: https://github.com/sealad886/DeepFilterNet4
 #!/usr/bin/env python3
 """Merge split ZIP archives while displaying a tqdm progress bar.
 
@@ -17,9 +17,17 @@ from tqdm import tqdm
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Merge a split ZIP archive with a progress bar.")
-    parser.add_argument("--download-dir", required=True, help="Directory containing the split ZIP files.")
-    parser.add_argument("--zip-base", required=True, help="ZIP basename, e.g. FSD50K.dev_audio.zip")
+    parser = argparse.ArgumentParser(
+        description="Merge a split ZIP archive with a progress bar."
+    )
+    parser.add_argument(
+        "--download-dir",
+        required=True,
+        help="Directory containing the split ZIP files.",
+    )
+    parser.add_argument(
+        "--zip-base", required=True, help="ZIP basename, e.g. FSD50K.dev_audio.zip"
+    )
     return parser.parse_args()
 
 
@@ -32,7 +40,9 @@ def count_zip_members(download_dir: Path, zip_base: str) -> int:
         check=False,
     )
     if result.returncode != 0:
-        raise RuntimeError(f"Failed to enumerate ZIP entries for {zip_base}: {result.stderr.strip()}")
+        raise RuntimeError(
+            f"Failed to enumerate ZIP entries for {zip_base}: {result.stderr.strip()}"
+        )
     return sum(1 for line in result.stdout.splitlines() if line.strip())
 
 
@@ -71,7 +81,9 @@ def merge_split_zip_with_progress(download_dir: Path, zip_base: str) -> Path:
     )
     assert process.stdout is not None
 
-    with tqdm(total=total_members, desc=f"Merging {zip_base}", unit="file", dynamic_ncols=True) as pbar:
+    with tqdm(
+        total=total_members, desc=f"Merging {zip_base}", unit="file", dynamic_ncols=True
+    ) as pbar:
         for raw_line in process.stdout:
             line = raw_line.strip()
             if not line:
@@ -86,7 +98,9 @@ def merge_split_zip_with_progress(download_dir: Path, zip_base: str) -> Path:
         if return_code != 0:
             if temp_merged_path.exists():
                 temp_merged_path.unlink()
-            raise RuntimeError(f"zip merge failed for {zip_base} with exit code {return_code}")
+            raise RuntimeError(
+                f"zip merge failed for {zip_base} with exit code {return_code}"
+            )
 
         if pbar.n < total_members:
             pbar.update(total_members - pbar.n)

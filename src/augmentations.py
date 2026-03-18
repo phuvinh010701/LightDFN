@@ -1,27 +1,18 @@
-"""Audio augmentation transforms for DeepFilterNet training.
-
-Port of DeepFilterNet libDF/src/augmentations.rs
-
-All augmentations follow the Rust implementation exactly, including:
-- Probability-based application
-- Environment variable overrides (DF_* variables)
-- Exact algorithms and formulas
-- Deterministic seeding support
-"""
-
 import os
 from abc import ABC, abstractmethod
 from typing import Optional, Union
+
 import numpy as np
 import torch
-from torch import Tensor
 from scipy import signal as scipy_signal
+from torch import Tensor
 
 try:
     from .io import resample
 except ImportError:
     # For standalone testing
     import sys
+
     sys.path.insert(0, os.path.dirname(__file__))
     from io import resample
 
@@ -48,9 +39,7 @@ class BaseAugmentation(ABC):
         self.rng = np.random.default_rng(seed)
 
     def __call__(
-        self,
-        audio: Union[np.ndarray, Tensor],
-        sample_rate: Optional[int] = None
+        self, audio: Union[np.ndarray, Tensor], sample_rate: Optional[int] = None
     ) -> Union[np.ndarray, Tensor]:
         """Apply augmentation with probability self.prob.
 
@@ -91,11 +80,7 @@ class BaseAugmentation(ABC):
         return audio_np
 
     @abstractmethod
-    def apply(
-        self,
-        audio: np.ndarray,
-        sample_rate: Optional[int] = None
-    ) -> np.ndarray:
+    def apply(self, audio: np.ndarray, sample_rate: Optional[int] = None) -> np.ndarray:
         """Apply the actual augmentation (to be implemented by subclasses).
 
         Args:
@@ -113,11 +98,7 @@ class BaseAugmentation(ABC):
 # ============================================================================
 
 
-def biquad_filter_inplace(
-    audio: np.ndarray,
-    b: np.ndarray,
-    a: np.ndarray
-) -> None:
+def biquad_filter_inplace(audio: np.ndarray, b: np.ndarray, a: np.ndarray) -> None:
     """Apply biquad filter in-place using Direct Form II.
 
     Port of DeepFilterNet biquad implementation.
@@ -151,10 +132,7 @@ def biquad_filter_inplace(
 
 
 def biquad_norm_inplace(
-    audio: np.ndarray,
-    mem: np.ndarray,
-    b: np.ndarray,
-    a: np.ndarray
+    audio: np.ndarray, mem: np.ndarray, b: np.ndarray, a: np.ndarray
 ) -> None:
     """Apply normalized biquad filter (RNNoise/PercepNet style).
 
@@ -178,12 +156,14 @@ def biquad_norm_inplace(
 
         # Update memory: shift and store
         mem[1] = mem[0]  # y[n-2] = y[n-1]
-        mem[0] = y       # y[n-1] = y[n]
+        mem[0] = y  # y[n-1] = y[n]
 
         audio[i] = y
 
 
-def lowpass_coefs(center_freq: float, q_factor: float, sr: int) -> tuple[np.ndarray, np.ndarray]:
+def lowpass_coefs(
+    center_freq: float, q_factor: float, sr: int
+) -> tuple[np.ndarray, np.ndarray]:
     """Calculate lowpass biquad filter coefficients.
 
     Audio EQ Cookbook (W3C Standard)
@@ -216,7 +196,9 @@ def lowpass_coefs(center_freq: float, q_factor: float, sr: int) -> tuple[np.ndar
     return b, a
 
 
-def highpass_coefs(center_freq: float, q_factor: float, sr: int) -> tuple[np.ndarray, np.ndarray]:
+def highpass_coefs(
+    center_freq: float, q_factor: float, sr: int
+) -> tuple[np.ndarray, np.ndarray]:
     """Calculate highpass biquad filter coefficients.
 
     Audio EQ Cookbook (W3C Standard)
@@ -249,10 +231,7 @@ def highpass_coefs(center_freq: float, q_factor: float, sr: int) -> tuple[np.nda
 
 
 def lowshelf_coefs(
-    center_freq: float,
-    q_factor: float,
-    gain_db: float,
-    sr: int
+    center_freq: float, q_factor: float, gain_db: float, sr: int
 ) -> tuple[np.ndarray, np.ndarray]:
     """Calculate lowshelf biquad filter coefficients.
 
@@ -289,10 +268,7 @@ def lowshelf_coefs(
 
 
 def highshelf_coefs(
-    center_freq: float,
-    q_factor: float,
-    gain_db: float,
-    sr: int
+    center_freq: float, q_factor: float, gain_db: float, sr: int
 ) -> tuple[np.ndarray, np.ndarray]:
     """Calculate highshelf biquad filter coefficients.
 
@@ -329,10 +305,7 @@ def highshelf_coefs(
 
 
 def peaking_eq_coefs(
-    center_freq: float,
-    q_factor: float,
-    gain_db: float,
-    sr: int
+    center_freq: float, q_factor: float, gain_db: float, sr: int
 ) -> tuple[np.ndarray, np.ndarray]:
     """Calculate peaking EQ biquad filter coefficients.
 
@@ -367,7 +340,9 @@ def peaking_eq_coefs(
     return b, a
 
 
-def notch_coefs(center_freq: float, q_factor: float, sr: int) -> tuple[np.ndarray, np.ndarray]:
+def notch_coefs(
+    center_freq: float, q_factor: float, sr: int
+) -> tuple[np.ndarray, np.ndarray]:
     """Calculate notch biquad filter coefficients.
 
     Audio EQ Cookbook (W3C Standard)
@@ -445,9 +420,9 @@ class RandLFilt(BaseAugmentation):
     def __init__(
         self,
         prob: float = 0.5,
-        a_range: tuple[float, float] = (-3.0/8.0, 3.0/8.0),
-        b_range: tuple[float, float] = (-3.0/8.0, 3.0/8.0),
-        seed: Optional[int] = None
+        a_range: tuple[float, float] = (-3.0 / 8.0, 3.0 / 8.0),
+        b_range: tuple[float, float] = (-3.0 / 8.0, 3.0 / 8.0),
+        seed: Optional[int] = None,
     ):
         """Initialize RandLFilt.
 
@@ -478,8 +453,12 @@ class RandLFilt(BaseAugmentation):
             squeeze = False
 
         # Sample coefficients
-        a = self.rng.uniform(self.a_range[0], self.a_range[1], size=2).astype(np.float32)
-        b = self.rng.uniform(self.b_range[0], self.b_range[1], size=2).astype(np.float32)
+        a = self.rng.uniform(self.a_range[0], self.a_range[1], size=2).astype(
+            np.float32
+        )
+        b = self.rng.uniform(self.b_range[0], self.b_range[1], size=2).astype(
+            np.float32
+        )
 
         # Apply per channel
         for ch_idx in range(audio.shape[0]):
@@ -505,7 +484,14 @@ class RandBiquadFilter(BaseAugmentation):
     Supports: lowpass, highpass, lowshelf, highshelf, peaking_eq, notch
     """
 
-    FILTER_TYPES = ['lowpass', 'highpass', 'lowshelf', 'highshelf', 'peaking_eq', 'notch']
+    FILTER_TYPES = [
+        "lowpass",
+        "highpass",
+        "lowshelf",
+        "highshelf",
+        "peaking_eq",
+        "notch",
+    ]
 
     def __init__(
         self,
@@ -514,7 +500,7 @@ class RandBiquadFilter(BaseAugmentation):
         q_range: tuple[float, float] = (0.5, 1.5),
         gain_range: tuple[float, float] = (-10.0, 10.0),
         filter_types: Optional[list[str]] = None,
-        seed: Optional[int] = None
+        seed: Optional[int] = None,
     ):
         """Initialize RandBiquadFilter.
 
@@ -556,17 +542,17 @@ class RandBiquadFilter(BaseAugmentation):
         gain_db = self.rng.uniform(self.gain_range[0], self.gain_range[1])
 
         # Get coefficients
-        if filter_type == 'lowpass':
+        if filter_type == "lowpass":
             b, a = lowpass_coefs(center_freq, q_factor, sample_rate)
-        elif filter_type == 'highpass':
+        elif filter_type == "highpass":
             b, a = highpass_coefs(center_freq, q_factor, sample_rate)
-        elif filter_type == 'lowshelf':
+        elif filter_type == "lowshelf":
             b, a = lowshelf_coefs(center_freq, q_factor, gain_db, sample_rate)
-        elif filter_type == 'highshelf':
+        elif filter_type == "highshelf":
             b, a = highshelf_coefs(center_freq, q_factor, gain_db, sample_rate)
-        elif filter_type == 'peaking_eq':
+        elif filter_type == "peaking_eq":
             b, a = peaking_eq_coefs(center_freq, q_factor, gain_db, sample_rate)
-        elif filter_type == 'notch':
+        elif filter_type == "notch":
             b, a = notch_coefs(center_freq, q_factor, sample_rate)
         else:
             raise ValueError(f"Unknown filter type: {filter_type}")
@@ -598,7 +584,7 @@ class RandResample(BaseAugmentation):
         self,
         prob: float = 0.2,
         rate_range: tuple[float, float] = (0.9, 1.1),
-        seed: Optional[int] = None
+        seed: Optional[int] = None,
     ):
         """Initialize RandResample.
 
@@ -669,7 +655,7 @@ class RandClipping(BaseAugmentation):
         self,
         prob: float = 0.2,
         clip_factor_range: tuple[float, float] = (0.1, 3.0),
-        seed: Optional[int] = None
+        seed: Optional[int] = None,
     ):
         """Initialize RandClipping.
 
@@ -715,7 +701,7 @@ class RandZeroingTD(BaseAugmentation):
         prob: float = 0.1,
         zero_prob: float = 0.2,
         max_consecutive: int = 5,
-        seed: Optional[int] = None
+        seed: Optional[int] = None,
     ):
         """Initialize RandZeroingTD.
 
@@ -792,9 +778,9 @@ class BandwidthLimiterAugmentation(BaseAugmentation):
 
     # Bandwidth presets (cutoff_freq, sample_rate)
     PRESETS = {
-        0: (4000, 8000),    # Narrowband (telephone)
-        1: (6000, 12000),   # Wideband
-        2: (8000, 16000),   # Super-wideband
+        0: (4000, 8000),  # Narrowband (telephone)
+        1: (6000, 12000),  # Wideband
+        2: (8000, 16000),  # Super-wideband
         3: (12000, 24000),  # Full-band
         4: (16000, 32000),  # High quality
         5: (18000, 36000),  # Higher quality
@@ -806,7 +792,7 @@ class BandwidthLimiterAugmentation(BaseAugmentation):
         self,
         prob: float = 0.2,
         presets: Optional[list[int]] = None,
-        seed: Optional[int] = None
+        seed: Optional[int] = None,
     ):
         """Initialize BandwidthLimiter.
 
@@ -877,7 +863,7 @@ class AirAbsorptionAugmentation(BaseAugmentation):
         self,
         prob: float = 0.1,
         distance_range: tuple[float, float] = (1.0, 100.0),
-        seed: Optional[int] = None
+        seed: Optional[int] = None,
     ):
         """Initialize AirAbsorption.
 
@@ -951,7 +937,7 @@ class RandReverbSim(BaseAugmentation):
         rir_files: Optional[list[str]] = None,
         rt60_range: tuple[float, float] = (0.2, 1.0),
         drr_range: tuple[float, float] = (0.0, 30.0),
-        seed: Optional[int] = None
+        seed: Optional[int] = None,
     ):
         """Initialize RandReverbSim.
 
@@ -968,10 +954,7 @@ class RandReverbSim(BaseAugmentation):
         self.drr_range = drr_range
 
     def _generate_synthetic_rir(
-        self,
-        rt60: float,
-        sample_rate: int,
-        length_samples: int
+        self, rt60: float, sample_rate: int, length_samples: int
     ) -> np.ndarray:
         """Generate synthetic RIR with exponential decay.
 
@@ -1005,7 +988,7 @@ class RandReverbSim(BaseAugmentation):
         rir[early_samples:] += noise[early_samples:] * envelope[early_samples:] * 0.3
 
         # Normalize
-        rir = rir / np.sqrt(np.sum(rir ** 2))
+        rir = rir / np.sqrt(np.sum(rir**2))
 
         return rir
 
@@ -1038,12 +1021,12 @@ class RandReverbSim(BaseAugmentation):
 
         # Convolve audio with RIR
         if audio.ndim == 1:
-            reverb_audio = scipy_signal.fftconvolve(audio, rir, mode='same')
+            reverb_audio = scipy_signal.fftconvolve(audio, rir, mode="same")
         else:
             reverb_audio = np.zeros_like(audio)
             for ch_idx in range(audio.shape[0]):
                 reverb_audio[ch_idx] = scipy_signal.fftconvolve(
-                    audio[ch_idx], rir, mode='same'
+                    audio[ch_idx], rir, mode="same"
                 )
 
         # Normalize to prevent clipping
@@ -1063,7 +1046,7 @@ def generate_colored_noise(
     num_samples: int,
     f_decay: float,
     num_channels: int = 1,
-    rng: Optional[np.random.Generator] = None
+    rng: Optional[np.random.Generator] = None,
 ) -> np.ndarray:
     """Generate colored noise with specified frequency decay.
 
@@ -1094,7 +1077,7 @@ def generate_colored_noise(
 
     # Apply power law: S(f) = 1 / f^decay
     scale = freqs ** (-f_decay / 2.0)  # sqrt because we're scaling amplitude
-    scale = scale / np.sqrt(np.mean(scale ** 2))  # Normalize
+    scale = scale / np.sqrt(np.mean(scale**2))  # Normalize
 
     # Apply scaling
     colored_spectrum = white_noise * scale[np.newaxis, :]
@@ -1106,7 +1089,7 @@ def generate_colored_noise(
     colored_noise = colored_noise[:, :num_samples]
 
     # Normalize RMS
-    rms_val = np.sqrt(np.mean(colored_noise ** 2))
+    rms_val = np.sqrt(np.mean(colored_noise**2))
     if rms_val > 1e-8:
         colored_noise = colored_noise / rms_val
 
@@ -1124,7 +1107,7 @@ class NoiseGenerator(BaseAugmentation):
         prob: float = 0.5,
         f_decay_range: tuple[float, float] = (-2.0, 2.0),
         snr_range: tuple[float, float] = (0.0, 30.0),
-        seed: Optional[int] = None
+        seed: Optional[int] = None,
     ):
         """Initialize NoiseGenerator.
 
@@ -1166,6 +1149,7 @@ class NoiseGenerator(BaseAugmentation):
 
         # Mix at target SNR
         from .utils import mix_f
+
         scale = mix_f(audio, noise, snr_db)
         noisy = audio + noise * scale
 
@@ -1200,9 +1184,7 @@ class Compose:
         self.transforms = transforms
 
     def __call__(
-        self,
-        audio: Union[np.ndarray, Tensor],
-        sample_rate: Optional[int] = None
+        self, audio: Union[np.ndarray, Tensor], sample_rate: Optional[int] = None
     ) -> Union[np.ndarray, Tensor]:
         """Apply all transforms in sequence.
 
@@ -1241,11 +1223,11 @@ def get_speech_augmentations(seed: Optional[int] = None) -> Compose:
     Returns:
         Compose object with speech augmentations
     """
-    p_remove_dc = get_env_float('DF_P_REMOVE_DC', 0.25)
-    p_lfilt = get_env_float('DF_P_LFILT', 0.3)
-    p_biquad = get_env_float('DF_P_BIQUAD', 0.3)
-    p_resample = get_env_float('DF_P_RESAMPLE', 0.2)
-    p_clipping = get_env_float('DF_P_CLIPPING', 0.1)
+    p_remove_dc = get_env_float("DF_P_REMOVE_DC", 0.25)
+    p_lfilt = get_env_float("DF_P_LFILT", 0.3)
+    p_biquad = get_env_float("DF_P_BIQUAD", 0.3)
+    p_resample = get_env_float("DF_P_RESAMPLE", 0.2)
+    p_clipping = get_env_float("DF_P_CLIPPING", 0.1)
 
     transforms = [
         RandRemoveDc(prob=p_remove_dc, seed=seed),
@@ -1268,8 +1250,8 @@ def get_noise_augmentations(seed: Optional[int] = None) -> Compose:
     Returns:
         Compose object with noise augmentations
     """
-    p_clipping = get_env_float('DF_P_CLIPPING_NOISE', 0.15)
-    p_biquad = get_env_float('DF_P_BIQUAD_NOISE', 0.4)
+    p_clipping = get_env_float("DF_P_CLIPPING_NOISE", 0.15)
+    p_biquad = get_env_float("DF_P_BIQUAD_NOISE", 0.4)
 
     transforms = [
         RandClipping(prob=p_clipping, seed=seed),
@@ -1289,8 +1271,8 @@ def get_speech_distortions_td(seed: Optional[int] = None) -> Compose:
     Returns:
         Compose object with distortion augmentations
     """
-    p_zeroing = get_env_float('DF_P_ZEROING', 0.1)
-    p_air = get_env_float('DF_P_AIR_AUG', 0.05)
+    p_zeroing = get_env_float("DF_P_ZEROING", 0.1)
+    p_air = get_env_float("DF_P_AIR_AUG", 0.05)
 
     transforms = [
         RandZeroingTD(prob=p_zeroing, seed=seed),
@@ -1320,10 +1302,7 @@ def get_noise_generator(
     Returns:
         NoiseGenerator augmentation
     """
-    return NoiseGenerator(
-        prob=p,
-        f_decay_range=(f_decay_min, f_decay_max)
-    )
+    return NoiseGenerator(prob=p, f_decay_range=(f_decay_min, f_decay_max))
 
 
 if __name__ == "__main__":

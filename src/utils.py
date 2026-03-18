@@ -1,6 +1,7 @@
 """Utility functions for audio processing, mixing, and analysis."""
 
 from typing import Optional, Union
+
 import numpy as np
 import torch
 from torch import Tensor, nn
@@ -39,13 +40,12 @@ def rms(values: Union[np.ndarray, Tensor]) -> float:
     if n == 0:
         return 0.0
 
-    pow_sum = np.sum(vals_flat ** 2)
+    pow_sum = np.sum(vals_flat**2)
     return float(np.sqrt(pow_sum / n))
 
 
 def normalize_audio(
-    audio: Union[np.ndarray, Tensor],
-    target_rms: Optional[float] = None
+    audio: Union[np.ndarray, Tensor], target_rms: Optional[float] = None
 ) -> Union[np.ndarray, Tensor]:
     """Normalize audio by RMS per channel.
 
@@ -77,7 +77,7 @@ def normalize_audio(
         squeeze = False
 
     # Calculate RMS per channel: shape (channels,)
-    rms_values = np.sqrt(np.mean(audio_np ** 2, axis=1)) + 1e-8
+    rms_values = np.sqrt(np.mean(audio_np**2, axis=1)) + 1e-8
 
     # Normalize
     normalized = audio_np / rms_values[:, np.newaxis]
@@ -126,8 +126,8 @@ def mix_f(clean: np.ndarray, noise: np.ndarray, snr_db: float) -> float:
         >>> scale = mix_f(clean, noise, snr_db=10.0)
         >>> scaled_noise = noise * scale
     """
-    e_clean = float(np.sum(clean ** 2) + 1e-10)
-    e_noise = float(np.sum(noise ** 2) + 1e-10)
+    e_clean = float(np.sum(clean**2) + 1e-10)
+    e_noise = float(np.sum(noise**2) + 1e-10)
     snr_linear = 10.0 ** (snr_db / 10.0)
 
     # Use float64 for stability, then cast back
@@ -274,7 +274,7 @@ def combine_noises(
         if noise.shape[1] > target_length:
             excess = noise.shape[1] - target_length
             start = rng.integers(0, excess + 1)
-            noise = noise[:, start:start + target_length]
+            noise = noise[:, start : start + target_length]
 
         # Step 2: Adjust number of channels
         # Remove random channels if too many
@@ -285,7 +285,7 @@ def combine_noises(
         # Duplicate random channels if too few
         while noise.shape[0] < num_channels:
             ch_to_dup = rng.integers(0, noise.shape[0])
-            duplicate = noise[ch_to_dup:ch_to_dup + 1, :]
+            duplicate = noise[ch_to_dup : ch_to_dup + 1, :]
             noise = np.vstack([noise, duplicate])
 
         # Step 3: Apply gain if provided
@@ -334,8 +334,7 @@ def apply_gain(signal: np.ndarray, gain_db: float) -> np.ndarray:
 
 
 def apply_gain_with_clipping_protection(
-    signal: np.ndarray,
-    gain_db: float
+    signal: np.ndarray, gain_db: float
 ) -> np.ndarray:
     """Apply gain with anti-clipping protection.
 
@@ -390,10 +389,7 @@ def rfftfreqs(n: int, sr: int) -> np.ndarray:
     return np.arange(n, dtype=np.float32) * (sr / 2) / (n - 1)
 
 
-def bw_filterbank(
-    center_freqs: np.ndarray,
-    cutoff_bins: np.ndarray
-) -> np.ndarray:
+def bw_filterbank(center_freqs: np.ndarray, cutoff_bins: np.ndarray) -> np.ndarray:
     """Create bandwidth estimation filterbank.
 
     Port of DeepFilterNet libDF/src/transforms.rs:480-507
@@ -489,8 +485,8 @@ def estimate_bandwidth(
 
     # 1. Initialize bandwidth filterbank
     cutoff_freqs = np.array(
-        [8000., 10000., 12000., 16000., 18000., 20000., 22000., 24000.],
-        dtype=np.float32
+        [8000.0, 10000.0, 12000.0, 16000.0, 18000.0, 20000.0, 22000.0, 24000.0],
+        dtype=np.float32,
     )
     center_freqs = rfftfreqs(n_freqs, sr)
     fb = bw_filterbank(center_freqs, cutoff_freqs)

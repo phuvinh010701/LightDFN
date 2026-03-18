@@ -10,9 +10,9 @@ from typing import Literal, Optional
 
 import h5py as h5
 import numpy as np
+import soundfile as sf
 import torch
 import torchaudio
-import soundfile as sf
 from loguru import logger
 from torch import Tensor
 from torch.utils.data import DataLoader, Dataset
@@ -48,7 +48,9 @@ class PreProcessingDataset(Dataset):
         self.mono = mono
         self.compression = compression
 
-        logger.info(f"DTYPE: {self.dtype}, CODEC: {self.codec}, COMPRESSION: {self.compression}")
+        logger.info(
+            f"DTYPE: {self.dtype}, CODEC: {self.codec}, COMPRESSION: {self.compression}"
+        )
 
     def read(self, file_path: str) -> Tensor:
         with warnings.catch_warnings():

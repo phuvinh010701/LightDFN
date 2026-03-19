@@ -8,8 +8,8 @@ and eval_clips_info_FSD50K.json) provided by FSD50K.
 
 import argparse
 import json
-import re
 import os
+import re
 from pathlib import Path
 
 
@@ -76,7 +76,11 @@ def main() -> int:
     with tmp_out.open("w") as f:
         for p in sorted(filtered):
             p_str = str(p)
-            if args.fsd50k_dir.startswith("./") and not p_str.startswith("./") and not p.is_absolute():
+            if (
+                args.fsd50k_dir.startswith("./")
+                and not p_str.startswith("./")
+                and not p.is_absolute()
+            ):
                 p_str = f"./{p_str}"
             f.write(p_str + "\n")
     tmp_out.replace(out)

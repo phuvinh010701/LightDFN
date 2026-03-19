@@ -1,4 +1,3 @@
-#Reference: https://github.com/sealad886/DeepFilterNet4
 #!/usr/bin/env bash
 set -euo pipefail
 

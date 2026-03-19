@@ -3,7 +3,7 @@
 set -euo pipefail
 
 ROOT_DIR="${ROOT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
-DEFAULT_DATA_DIR="/Volumes/TrainingData/datasets"
+DEFAULT_DATA_DIR="./datasets"
 if [[ ! -d "${DEFAULT_DATA_DIR}" ]]; then
   DEFAULT_DATA_DIR="${ROOT_DIR}/data"
 fi
@@ -406,6 +406,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 DATA_DIR="${CLI_DATA_DIR:-${DATA_DIR:-${DEFAULT_DATA_DIR}}}"
+DATA_DIR="${DATA_DIR%/}"
 LIST_DIR="${CLI_LIST_DIR:-${LIST_DIR:-${DATA_DIR}/lists}}"
 
 # Download controls (opt-in)

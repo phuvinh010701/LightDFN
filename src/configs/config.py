@@ -74,15 +74,23 @@ class ModelConfig:
 
 @dataclass
 class AugmentationConfig:
-    """Augmentation probabilities."""
+    """Augmentation probabilities for all pipeline stages."""
 
+    # Speech augmentations (get_speech_augmentations)
     p_remove_dc: float = 0.25
     p_lfilt: float = 0.30
     p_biquad: float = 0.30
     p_resample: float = 0.20
     p_clipping: float = 0.10
+
+    # Noise augmentations (get_noise_augmentations)
     p_noise_clipping: float = 0.15
-    p_noise_distortion: float = 0.10
+    p_noise_biquad: float = 0.40
+
+    # Speech distortions — time domain (get_speech_distortions_td)
+    p_zeroing: float = 0.10
+    p_air_absorption: float = 0.05
+    p_bandwidth_limit: float = 0.20
 
 
 def load_config(

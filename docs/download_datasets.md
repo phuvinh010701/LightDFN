@@ -7,7 +7,7 @@ This document describes the dataset acquisition workflow for LightDFN. The pipel
 Use the repository script directly with CLI flags:
 
 ```bash
-./script/datasets/download_datasets.sh \
+./scripts/datasets/download_datasets.sh \
   --data-dir "./datasets/" \
   --profile prototype \
   --use-aria2 \

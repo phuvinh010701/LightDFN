@@ -75,7 +75,14 @@ def main() -> int:
     out.parent.mkdir(parents=True, exist_ok=True)
     with tmp_out.open("w") as f:
         for p in sorted(filtered):
-            f.write(str(p) + "\n")
+            p_str = str(p)
+            if (
+                args.fsd50k_dir.startswith("./")
+                and not p_str.startswith("./")
+                and not p.is_absolute()
+            ):
+                p_str = f"./{p_str}"
+            f.write(p_str + "\n")
     tmp_out.replace(out)
 
     print(f"[ok] wrote {len(filtered)} entries -> {out}")

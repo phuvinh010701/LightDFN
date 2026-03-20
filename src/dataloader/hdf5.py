@@ -1,16 +1,15 @@
-"""HDF5-backed audio dataset."""
-
 from __future__ import annotations
 
 import h5py
 import numpy as np
+from src.types import AudioDatasetType
 
 
 class Hdf5Dataset:
     """Read audio samples from a single HDF5 file.
 
     Each file stores samples under ``<type>/<key>`` where ``<type>`` is
-    ``"speech"``, ``"noise"``, ``"rir"``, or ``"noisy"``.
+    ``"speech"``, ``"noise"`` or ``"rir"````.
 
     ``sampling_factor`` scales the effective dataset length: a factor of 100
     means each unique clip appears 100 times per epoch (oversampling). Access
@@ -34,7 +33,8 @@ class Hdf5Dataset:
         with h5py.File(file_path, "r") as f:
             self.sr: int = int(f.attrs["sr"].item())  # type: ignore[union-attr]
             self.max_freq: int = int(f.attrs["max_freq"].item())  # type: ignore[union-attr]
-            self.dataset_type: str = str(list(f.keys())[0])
+            self.dataset_type: AudioDatasetType = list(f.keys())[0]
+
             group = f[self.dataset_type]
             assert isinstance(group, h5py.Group)
             self.keys: list[str] = list(group.keys())
@@ -44,7 +44,7 @@ class Hdf5Dataset:
 
     @property
     def _file(self) -> h5py.File:
-        if self._h5file is None or not self._h5file.id.valid:
+        if self._h5file is None:
             self._h5file = h5py.File(self.file_path, "r")
         return self._h5file
 
@@ -52,9 +52,11 @@ class Hdf5Dataset:
         return self.effective_size
 
     def __getitem__(
-        self, idx: int, rng: np.random.Generator | None = None
+        self,
+        idx: int,
+        rng: np.random.Generator = np.random.default_rng(),
     ) -> np.ndarray:
-        """Return one audio sample, shape ``(channels, samples)``."""
+        """Return one sample ``(channels, samples)``."""
         key = self.keys[idx % len(self.keys)]
         ds = self._file[f"{self.dataset_type}/{key}"]
         assert isinstance(ds, h5py.Dataset)
@@ -63,14 +65,13 @@ class Hdf5Dataset:
         if self.max_len_s is not None:
             max_samples = int(self.max_len_s * self.sr)
             if audio.shape[1] > max_samples:
-                _rng = rng or np.random.default_rng()
-                start = int(_rng.integers(0, audio.shape[1] - max_samples + 1))
+                start = int(rng.integers(0, audio.shape[1] - max_samples + 1))
                 audio = audio[:, start : start + max_samples]
 
         return audio
 
     def get_at_least(
-        self, idx: int, min_samples: int, rng: np.random.Generator | None = None
+        self, idx: int, min_samples: int, rng: np.random.Generator = np.random.default_rng()
     ) -> np.ndarray:
         """Load a sample, tiling it until it has at least ``min_samples`` frames."""
         audio = self.__getitem__(idx, rng=rng)
@@ -79,7 +80,7 @@ class Hdf5Dataset:
         return audio
 
     def close(self) -> None:
-        if self._h5file is not None and self._h5file.id.valid:
+        if self._h5file is not None:
             self._h5file.close()
         self._h5file = None
 
@@ -91,3 +92,11 @@ class Hdf5Dataset:
             f"Hdf5Dataset('{self.file_path}', type='{self.dataset_type}', "
             f"keys={len(self.keys)}, effective={self.effective_size}, sr={self.sr})"
         )
+
+if __name__ == "__main__":
+    speech_hdf5_path = "datasets/hdf5/speech_clean.hdf5"
+
+    speech_dataset = Hdf5Dataset(speech_hdf5_path)
+    print(speech_dataset)
+    print(speech_dataset[0])
+    assert type(speech_dataset[0]) == np.ndarray

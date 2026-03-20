@@ -93,9 +93,27 @@ class AugmentationConfig:
     p_bandwidth_limit: float = 0.20
 
 
+@dataclass
+class DataLoaderConfig:
+    """Configuration for building training/validation dataloaders."""
+
+    speech_hdf5: list[str]
+    noise_hdf5: list[str]
+    rir_hdf5: list[str] = field(default_factory=list)
+    sr: int = 48_000
+    max_len_s: float = 5.0
+    batch_size: int = 4
+    num_workers: int = 4
+    seed: int = 42
+    fft_size: int = 960
+    hop_size: int = 480
+    nb_erb: int = 32
+    nb_spec: int = 96
+
+
 def load_config(
     path: str | os.PathLike | None = None,
-) -> tuple[ModelConfig, AugmentationConfig]:
+) -> tuple[ModelConfig, AugmentationConfig, DataLoaderConfig]:
     """Load ModelConfig and AugmentationConfig from a YAML file.
 
     Args:
@@ -111,6 +129,7 @@ def load_config(
 
     model_raw = raw.get("model", {})
     augmentation_raw = raw.get("augmentation", {})
+    data_loader_raw = raw.get("data_loader", {})
 
     for key in ("conv_kernel", "convt_kernel", "conv_kernel_inp"):
         if key in model_raw:
@@ -118,5 +137,6 @@ def load_config(
 
     model_cfg = ModelConfig(**model_raw)
     augmentation_cfg = AugmentationConfig(**augmentation_raw)
+    data_loader_cfg = DataLoaderConfig(**data_loader_raw)
 
-    return model_cfg, augmentation_cfg
+    return model_cfg, augmentation_cfg, data_loader_cfg

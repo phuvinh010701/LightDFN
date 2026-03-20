@@ -521,7 +521,7 @@ if __name__ == "__main__":
     from src.configs.config import load_config
     from src.utils.utils import count_parameters
 
-    model_config, _ = load_config()
+    model_config, _, _ = load_config()
 
     model = init_model(model_config)
     model.eval()

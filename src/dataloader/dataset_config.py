@@ -17,10 +17,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
-
-Split = Literal["train", "valid", "test"]
-
+from src.types import SplitType
 
 @dataclass
 class DatasetEntry:
@@ -38,7 +35,7 @@ class DatasetConfig:
     valid: list[DatasetEntry]
     test: list[DatasetEntry]
 
-    def get_split(self, split: Split) -> list[DatasetEntry]:
+    def get_split(self, split: SplitType) -> list[DatasetEntry]:
         return getattr(self, split)
 
     @classmethod

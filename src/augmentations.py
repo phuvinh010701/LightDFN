@@ -291,31 +291,25 @@ class RandRemoveDc(BaseWaveformTransform):
     Simple mean subtraction: y[n] = x[n] - mean(x)
     """
 
-    def __init__(self, prob: float = 0.25, sample_rate: int = 48000):
-        super().__init__(p=prob, sample_rate=sample_rate, output_type="tensor")
+    def __init__(self, prob: float = 0.25, sample_rate: int = 48000, **kwargs):
+        super().__init__(p=prob, sample_rate=sample_rate)
+        self.sample_rate = sample_rate
+        self.target_rate = kwargs.get("target_rate", sample_rate)
 
-    def apply_transform(
-        self,
-        samples: Tensor = None,
-        sample_rate: Optional[int] = None,
-        targets: Optional[Tensor] = None,
-        target_rate: Optional[int] = None,
-    ) -> ObjectDict:
+    def apply_transform(self, samples: Tensor, *args, **kwargs) -> Tensor:
         """Remove DC offset from audio.
 
         Args:
             samples: Audio array of shape (batch_size, channels, samples)
 
         Returns:
-            ObjectDict with DC offset removed
+            Tensor with DC offset removed
         """
         mean = samples.mean(dim=-1, keepdim=True)
-        samples = samples - mean
+        out = samples - mean
+
         return ObjectDict(
-            samples=samples,
-            sample_rate=sample_rate,
-            targets=targets,
-            target_rate=target_rate,
+            samples=out, sample_rate=self.sample_rate, target_rate=self.target_rate
         )
 
 
@@ -323,30 +317,11 @@ class BaseAugmentation(BaseWaveformTransform):
     """Base augmentation class."""
 
     def __init__(self, prob: float, seed: Optional[int] = None):
-        super().__init__(p=prob, output_type="tensor")
-        self.rng = np.random.default_rng(seed)
+        super().__init__(prob=prob, seed=seed)
 
-    def apply_transform(
-        self,
-        samples: Tensor = None,
-        sample_rate: Optional[int] = None,
-        targets: Optional[Tensor] = None,
-        target_rate: Optional[int] = None,
-    ) -> ObjectDict:
+    def apply_transform(self, samples: Tensor) -> ObjectDict:
         """Apply augmentation."""
-        if hasattr(self, "apply"):
-            np_samples = samples.cpu().numpy()
-            out_samples = np.zeros_like(np_samples)
-            for b in range(np_samples.shape[0]):
-                out_samples[b] = self.apply(np_samples[b], sample_rate)
-            samples = torch.from_numpy(out_samples).to(samples.device)
-
-        return ObjectDict(
-            samples=samples,
-            sample_rate=sample_rate,
-            targets=targets,
-            target_rate=target_rate,
-        )
+        return super().apply_transform(samples)
 
 
 class RandLFilt(BaseWaveformTransform):
@@ -1149,7 +1124,7 @@ def get_noise_augmentations(seed: Optional[int] = None) -> Compose:
         RandBiquadFilter(prob=p_biquad, seed=seed),
     ]
 
-    return Compose(transforms, output_type="tensor")
+    return Compose(transforms)
 
 
 def get_speech_distortions_td(seed: Optional[int] = None) -> Compose:
@@ -1171,7 +1146,7 @@ def get_speech_distortions_td(seed: Optional[int] = None) -> Compose:
         BandwidthLimiterAugmentation(prob=0.2, seed=seed),
     ]
 
-    return Compose(transforms, output_type="tensor")
+    return Compose(transforms)
 
 
 def get_noise_generator(
@@ -1230,19 +1205,20 @@ if __name__ == "__main__":
 
     # Test pipelines
     print("\nTesting pipelines...")
+
     model_config, augmentation_config = load_config()
 
     speech_augs = get_speech_augmentations(augmentation_config)
     # noise_augs = get_noise_augmentations()
     # distortion_augs = get_speech_distortions_td()
 
-    output_speech = speech_augs(audio, sample_rate=48000)
-    print(f"✓ Speech augmentations: {output_speech.shape}")
+    output = speech_augs(audio, sample_rate=48000)
+    print(f"✓ Speech augmentations: {output.shape}")
 
-    # output_noise = noise_augs(audio, sample_rate=48000)
-    # print(f"✓ Noise augmentations: {output_noise.shape}")
+    # output = noise_augs(audio, sample_rate=48000)
+    # print(f"✓ Noise augmentations: {output.shape}")
 
-    # output_dist = distortion_augs(audio, sample_rate=48000)
-    # print(f"✓ Distortion augmentations: {output_dist.shape}")
+    # output = distortion_augs(audio, sample_rate=48000)
+    # print(f"✓ Distortion augmentations: {output.shape}")
 
     print("\nAll tests passed!")

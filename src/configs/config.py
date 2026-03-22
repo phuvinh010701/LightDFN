@@ -1,9 +1,7 @@
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Tuple
-from src.dataloader.dataset_config import DatasetConfig
-from src.dataloader.td import _partition
+
 import yaml
 
 _DEFAULT_CONFIG_PATH = Path(__file__).parent / "default.yaml"
@@ -40,9 +38,9 @@ class ModelConfig:
     conv_ch: int = 64
     conv_depthwise: bool = True
     convt_depthwise: bool = False
-    conv_kernel: Tuple[int, int] = field(default_factory=lambda: (1, 3))
-    convt_kernel: Tuple[int, int] = field(default_factory=lambda: (1, 3))
-    conv_kernel_inp: Tuple[int, int] = field(default_factory=lambda: (3, 3))
+    conv_kernel: tuple[int, int] = field(default_factory=lambda: (1, 3))
+    convt_kernel: tuple[int, int] = field(default_factory=lambda: (1, 3))
+    conv_kernel_inp: tuple[int, int] = field(default_factory=lambda: (3, 3))
 
     # Embedding/Encoder GRU parameters
     emb_hidden_dim: int = 256
@@ -69,7 +67,7 @@ class ModelConfig:
     pf_beta: float = 0.02
     lsnr_dropout: bool = False
 
-    # Li-GRU specific
+    # Li-GRU specific — should match DataLoaderConfig.batch_size at training time
     batch_size: int = 1
 
 
@@ -98,8 +96,9 @@ class AugmentationConfig:
 class DataLoaderConfig:
     """Configuration for building training/validation dataloaders."""
 
-    dataset_cfg: str
-    dataset_dir: str
+    speech_hdf5: list[str] = field(default_factory=list)
+    noise_hdf5: list[str] = field(default_factory=list)
+    rir_hdf5: list[str] = field(default_factory=list)
     sr: int = 48_000
     max_len_s: float = 5.0
     batch_size: int = 4
@@ -110,23 +109,34 @@ class DataLoaderConfig:
     nb_erb: int = 32
     nb_spec: int = 96
 
-    def get_split(self, split: str) -> tuple:
-        """Return ``(speech_files, noise_files, rir_files)`` for the given split."""
 
-        ds = DatasetConfig.from_path(self.dataset_cfg, self.dataset_dir)
-        return _partition(ds.get_split(split))
+@dataclass
+class TrainConfig:
+    """Training loop configuration."""
+
+    epochs: int = 100
+    lr: float = 5e-4
+    lr_min: float = 1e-5
+    warmup_epochs: int = 3
+    weight_decay: float = 0.05
+    grad_clip: float = 1.0
+    checkpoint_dir: str = "checkpoints"
+    wandb_project: str = "lightdfn"
+    log_every_n_steps: int = 100
+    val_every_n_epochs: int = 1
+    max_nans: int = 50
 
 
 def load_config(
     path: str | os.PathLike | None = None,
-) -> tuple[ModelConfig, AugmentationConfig, DataLoaderConfig]:
-    """Load ModelConfig and AugmentationConfig from a YAML file.
+) -> tuple[ModelConfig, AugmentationConfig, DataLoaderConfig, TrainConfig]:
+    """Load all configs from a YAML file.
 
     Args:
-        path: Path to a YAML config file. Defaults to config/default.yaml.
+        path: Path to a YAML config file. Defaults to src/configs/default.yaml.
 
     Returns:
-        Tuple of (ModelConfig, AugmentationConfig).
+        Tuple of (ModelConfig, AugmentationConfig, DataLoaderConfig, TrainConfig).
     """
     config_path = Path(path) if path is not None else _DEFAULT_CONFIG_PATH
 
@@ -136,6 +146,7 @@ def load_config(
     model_raw = raw.get("model", {})
     augmentation_raw = raw.get("augmentation", {})
     data_loader_raw = raw.get("data_loader", {})
+    train_raw = raw.get("train", {})
 
     for key in ("conv_kernel", "convt_kernel", "conv_kernel_inp"):
         if key in model_raw:
@@ -144,5 +155,6 @@ def load_config(
     model_cfg = ModelConfig(**model_raw)
     augmentation_cfg = AugmentationConfig(**augmentation_raw)
     data_loader_cfg = DataLoaderConfig(**data_loader_raw)
+    train_cfg = TrainConfig(**train_raw)
 
-    return model_cfg, augmentation_cfg, data_loader_cfg
+    return model_cfg, augmentation_cfg, data_loader_cfg, train_cfg

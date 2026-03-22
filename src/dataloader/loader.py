@@ -1,19 +1,19 @@
 """Batch collation, DataLoader wrapper, and builder for TdDataset / FftDataset."""
 
-from __future__ import annotations
-
 import math
+from collections.abc import Iterator
 from dataclasses import dataclass
 
 import numpy as np
 import torch
+from loguru import logger
 from torch import Tensor
 from torch.utils.data import DataLoader, Dataset
 
-from src.dataloader.fft import FftDataset
-from src.dataloader.td import Sample, TdDataset, _partition
-from src.dataloader.dataset_config import DatasetConfig
 from src.configs.config import AugmentationConfig, DataLoaderConfig
+from src.dataloader.dataset_config import DatasetEntry
+from src.dataloader.fft import FftDataset
+from src.dataloader.td import Sample, TdDataset
 from src.types import SplitType
 
 
@@ -57,6 +57,7 @@ def collate_fn(samples: list[Sample]) -> DsBatch:
     max_len = int(lengths.max())
 
     def pad_and_stack(tensors: list[Tensor]) -> Tensor:
+        """Zero-pad each tensor to ``max_len`` along the last dimension and stack."""
         padded = []
         for t in tensors:
             pad_len = max_len - t.shape[-1]
@@ -111,7 +112,7 @@ class DeepFilterNetDataLoader:
         """Re-seed the DataLoader for the given epoch index."""
         g = torch.Generator()
         g.manual_seed(self.seed + epoch_idx)
-        print(f"Seeding DataLoader with seed {self.seed + epoch_idx}")
+        logger.debug(f"Seeding DataLoader with seed {self.seed + epoch_idx}")
         self._loader = DataLoader(
             self.dataset,
             batch_size=self.batch_size,
@@ -121,10 +122,10 @@ class DeepFilterNetDataLoader:
             generator=g,
         )
 
-    def __iter__(self):
+    def __iter__(self) -> Iterator[DsBatch]:
+        """Return an iterator over batches, initialising epoch 0 if needed."""
         if self._loader is None:
             self.start_epoch(0)
-        print("Iterating over DataLoader")
         return iter(self._loader)  # type: ignore[arg-type]
 
 
@@ -144,11 +145,16 @@ class DataLoaderBuilder:
         """Build a dataloader for the requested split.
 
         Args:
-            split:   One of SplitType.
-            aug_config: Augmentation configuration.
-            use_fft: If ``True``, wraps the dataset with :class:`FftDataset`.
+            split (SplitType): Dataset split to load.
+            aug_config (AugmentationConfig): Augmentation configuration.
+            use_fft (bool): If ``True``, wraps the dataset with :class:`FftDataset`.
+
+        Returns:
+            DeepFilterNetDataLoader: Configured dataloader for the split.
         """
+
         def _entries(paths: list[str]) -> list[DatasetEntry]:
+            """Wrap plain path strings into DatasetEntry objects with unit sampling."""
             return [DatasetEntry(path=p, sampling_factor=1.0) for p in paths]
 
         td_dataset = TdDataset(
@@ -184,7 +190,9 @@ class DataLoaderBuilder:
 if __name__ == "__main__":
     from src.configs.config import load_config
 
-    _, augmentation_config, data_loader_config = load_config("./src/configs/test.yaml")
+    _, augmentation_config, data_loader_config, _ = load_config(
+        "./src/configs/test.yaml"
+    )
     builder = DataLoaderBuilder(data_loader_config)
 
     print("=== FftDataset (training) smoke test ===")

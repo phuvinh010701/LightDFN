@@ -6,7 +6,7 @@ import time
 import warnings
 from multiprocessing import Pool
 from pathlib import Path
-from typing import Literal, Optional
+from typing import Optional
 
 import h5py as h5
 import numpy as np
@@ -17,7 +17,7 @@ from loguru import logger
 from torch import Tensor
 from torch.utils.data import DataLoader, Dataset
 
-from src.constants import AUDIO_DATASET_TYPES
+from src.types import AudioDatasetType
 from src.utils.io import encode, resample
 
 
@@ -84,7 +84,7 @@ class PreProcessingDataset(Dataset):
 
 def write_to_h5(
     output_file_name: str,
-    dataset_type: Literal[AUDIO_DATASET_TYPES],
+    dataset_type: AudioDatasetType,
     audio_file_names: list[str],
     sr: int,
     max_freq: int = -1,
@@ -223,11 +223,6 @@ def main() -> None:
 
     logger.remove()
     logger.add(lambda m: print(m, end=""), level="INFO")
-
-    if args.type not in AUDIO_DATASET_TYPES:
-        raise ValueError(
-            f"Dataset type must be one of {AUDIO_DATASET_TYPES}, but got {args.type}"
-        )
 
     if not args.hdf5_db.endswith(".hdf5"):
         args.hdf5_db += ".hdf5"

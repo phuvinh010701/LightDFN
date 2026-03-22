@@ -6,7 +6,7 @@ import time
 import warnings
 from multiprocessing import Pool
 from pathlib import Path
-from typing import Literal, Optional
+from typing import Optional
 
 import h5py as h5
 import numpy as np

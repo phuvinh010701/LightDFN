@@ -19,6 +19,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from src.types import SplitType
 
+
 @dataclass
 class DatasetEntry:
     """One HDF5 file with its sampling weight."""

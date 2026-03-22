@@ -71,7 +71,10 @@ class Hdf5Dataset:
         return audio
 
     def get_at_least(
-        self, idx: int, min_samples: int, rng: np.random.Generator = np.random.default_rng()
+        self,
+        idx: int,
+        min_samples: int,
+        rng: np.random.Generator = np.random.default_rng(),
     ) -> np.ndarray:
         """Load a sample, tiling it until it has at least ``min_samples`` frames."""
         audio = self.__getitem__(idx, rng=rng)
@@ -92,6 +95,7 @@ class Hdf5Dataset:
             f"Hdf5Dataset('{self.file_path}', type='{self.dataset_type}', "
             f"keys={len(self.keys)}, effective={self.effective_size}, sr={self.sr})"
         )
+
 
 if __name__ == "__main__":
     speech_hdf5_path = "datasets/hdf5/speech_clean.hdf5"

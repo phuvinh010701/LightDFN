@@ -145,7 +145,11 @@ def _mix_audio_signal(
     """
     gain_linear = 10.0 ** (gain_db / 20.0)
     clean_out = clean * gain_linear
-    clean_mix = (clean_distorted * gain_linear) if clean_distorted is not None else clean_out.clone()
+    clean_mix = (
+        (clean_distorted * gain_linear)
+        if clean_distorted is not None
+        else clean_out.clone()
+    )
 
     e_clean = float(clean_out.pow(2).sum().item()) + 1e-10
     e_noise = float(noise.pow(2).sum().item()) + 1e-10
@@ -169,7 +173,9 @@ def _mix_audio_signal(
     return clean_out, noise_out, mixture
 
 
-def _adjust_channels(audio: Tensor, num_channels: int, rng: np.random.Generator) -> Tensor:
+def _adjust_channels(
+    audio: Tensor, num_channels: int, rng: np.random.Generator
+) -> Tensor:
     """Adjust ``(C, T)`` Tensor to exactly ``num_channels`` channels."""
     while audio.shape[0] < num_channels:
         ch = int(rng.integers(0, audio.shape[0]))
@@ -293,7 +299,9 @@ class TdDataset(Dataset):
             else speech
         )
 
-        speech_out, noise_out, noisy = _mix_audio_signal(speech, noise, snr, gain, speech_input)
+        speech_out, noise_out, noisy = _mix_audio_signal(
+            speech, noise, snr, gain, speech_input
+        )
 
         if speech_out.shape[0] != self.num_channels:
             speech_out = _adjust_channels(speech_out, self.num_channels, rng)
@@ -476,7 +484,7 @@ def _partition(
             logger.warning("Skipping %s: %s", entry.path, exc)
             continue
 
-        if ds_type in ("speech", "noisy"):
+        if ds_type in ("speech"):
             speech.append(entry)
         elif ds_type == "noise":
             noise.append(entry)

@@ -11,8 +11,8 @@ from torch import Tensor
 from torch.utils.data import DataLoader, Dataset
 
 from src.dataloader.fft import FftDataset
-from src.dataloader.td import Sample, TdDataset
-from src.dataloader.dataset_config import DatasetEntry
+from src.dataloader.td import Sample, TdDataset, _partition
+from src.dataloader.dataset_config import DatasetConfig
 from src.configs.config import AugmentationConfig, DataLoaderConfig
 from src.types import SplitType
 
@@ -128,7 +128,6 @@ class DeepFilterNetDataLoader:
         return iter(self._loader)  # type: ignore[arg-type]
 
 
-
 class DataLoaderBuilder:
     """Builds a :class:`DeepFilterNetDataLoader` from a :class:`DataLoaderConfig`.
 
@@ -136,71 +135,77 @@ class DataLoaderBuilder:
         config: Dataloader configuration.
     """
 
-    def __init__(self, config: DataLoaderConfig) -> None:
-        self.config = config
+    def __init__(self, loader_config: DataLoaderConfig) -> None:
+        self.loader_config = loader_config
 
-    def build(self, split: SplitType = "train", use_fft: bool = True) -> DeepFilterNetDataLoader:
+    def build(
+        self, split: SplitType, aug_config: AugmentationConfig, use_fft: bool = True
+    ) -> DeepFilterNetDataLoader:
         """Build a dataloader for the requested split.
 
         Args:
             split:   One of SplitType.
+            aug_config: Augmentation configuration.
             use_fft: If ``True``, wraps the dataset with :class:`FftDataset`.
         """
-        cfg = self.config
-        aug_config = AugmentationConfig()
-
         def _entries(paths: list[str]) -> list[DatasetEntry]:
             return [DatasetEntry(path=p, sampling_factor=1.0) for p in paths]
 
         td_dataset = TdDataset(
-            speech_files=_entries(cfg.speech_hdf5),
-            noise_files=_entries(cfg.noise_hdf5),
-            rir_files=_entries(cfg.rir_hdf5),
+            speech_files=_entries(self.loader_config.speech_hdf5),
+            noise_files=_entries(self.loader_config.noise_hdf5),
+            rir_files=_entries(self.loader_config.rir_hdf5),
             aug_config=aug_config,
             split=split,
-            sr=cfg.sr,
-            max_len_s=cfg.max_len_s,
-            seed=cfg.seed,
+            sr=self.loader_config.sr,
+            max_len_s=self.loader_config.max_len_s,
+            seed=self.loader_config.seed,
         )
 
         dataset: Dataset = td_dataset
         if use_fft:
             dataset = FftDataset(
                 td_dataset=td_dataset,
-                fft_size=cfg.fft_size,
-                hop_size=cfg.hop_size,
-                nb_erb=cfg.nb_erb,
-                nb_spec=cfg.nb_spec,
-                sr=cfg.sr,
+                fft_size=self.loader_config.fft_size,
+                hop_size=self.loader_config.hop_size,
+                nb_erb=self.loader_config.nb_erb,
+                nb_spec=self.loader_config.nb_spec,
+                sr=self.loader_config.sr,
             )
 
         return DeepFilterNetDataLoader(
             dataset=dataset,
-            batch_size=cfg.batch_size,
-            num_workers=cfg.num_workers,
-            seed=cfg.seed,
+            batch_size=self.loader_config.batch_size,
+            num_workers=self.loader_config.num_workers,
+            seed=self.loader_config.seed,
         )
 
 
 if __name__ == "__main__":
     from src.configs.config import load_config
 
-    _, _, data_loader_config = load_config('./src/configs/test.yaml')
+    _, augmentation_config, data_loader_config = load_config("./src/configs/test.yaml")
     builder = DataLoaderBuilder(data_loader_config)
 
     print("=== FftDataset (training) smoke test ===")
-    loader = builder.build("train")  # use_fft=True by default
+    loader = builder.build(
+        split="train", aug_config=augmentation_config
+    )  # use_fft=True by default
     print("Built dataloader OK")
 
     max_samples = int(data_loader_config.max_len_s * data_loader_config.sr)
-    n_frames = (max_samples - data_loader_config.fft_size) // data_loader_config.hop_size + 1
+    n_frames = (
+        max_samples - data_loader_config.fft_size
+    ) // data_loader_config.hop_size + 1
     for i, batch in enumerate(loader):
         assert batch.speech.shape[-1] == max_samples
         assert batch.feat_erb.shape[-2:] == (n_frames, data_loader_config.nb_erb)
         assert batch.feat_spec.shape[-2:] == (n_frames, data_loader_config.nb_spec)
         assert not torch.isnan(batch.feat_erb).any()
         assert not torch.isnan(batch.feat_spec.real).any()
-        print(f"  batch {i:03d} | speech {tuple(batch.speech.shape)} | snr {batch.snr.tolist()} | gain {batch.gain.tolist()}")
+        print(
+            f"  batch {i:03d} | speech {tuple(batch.speech.shape)} | snr {batch.snr.tolist()} | gain {batch.gain.tolist()}"
+        )
     print("  ✓ all batches OK")
 
     print("\nAll smoke tests passed.")

@@ -2,7 +2,8 @@ import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Tuple
-
+from src.dataloader.dataset_config import DatasetConfig
+from src.dataloader.td import _partition
 import yaml
 
 _DEFAULT_CONFIG_PATH = Path(__file__).parent / "default.yaml"
@@ -97,9 +98,8 @@ class AugmentationConfig:
 class DataLoaderConfig:
     """Configuration for building training/validation dataloaders."""
 
-    speech_hdf5: list[str]
-    noise_hdf5: list[str]
-    rir_hdf5: list[str] = field(default_factory=list)
+    dataset_cfg: str
+    dataset_dir: str
     sr: int = 48_000
     max_len_s: float = 5.0
     batch_size: int = 4
@@ -109,6 +109,12 @@ class DataLoaderConfig:
     hop_size: int = 480
     nb_erb: int = 32
     nb_spec: int = 96
+
+    def get_split(self, split: str) -> tuple:
+        """Return ``(speech_files, noise_files, rir_files)`` for the given split."""
+
+        ds = DatasetConfig.from_path(self.dataset_cfg, self.dataset_dir)
+        return _partition(ds.get_split(split))
 
 
 def load_config(

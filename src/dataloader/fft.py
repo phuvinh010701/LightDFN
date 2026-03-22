@@ -6,7 +6,7 @@ import torch
 from torch import Tensor
 from torch.utils.data import Dataset
 
-from src.dataloader.td import Sample, TdDataset, TdSample
+from src.dataloader.td import Sample, TdDataset
 from src.utils.erb import create_erb_fb, erb_fb_widths
 
 

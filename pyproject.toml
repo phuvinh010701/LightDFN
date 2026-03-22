@@ -17,6 +17,7 @@ dependencies = [
     "torchcodec>=0.10.0",
     "maturin>=1.12.6",
     "torch-audiomentations>=0.12.0",
+    "wandb>=0.25.1",
 ]
 
 [[tool.uv.index]]

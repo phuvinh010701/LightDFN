@@ -76,9 +76,9 @@ augmentation:
   p_bandwidth_limit: 0.20
 
 data_loader:
-  speech_hdf5: ['datasets/hdf5/speech_clean.hdf5']
-  noise_hdf5: ['datasets/hdf5/noise_music.hdf5']
-  rir_hdf5: ['datasets/hdf5/rir.hdf5']
+  speech_hdf5: ["datasets/hdf5/speech_clean.hdf5"]
+  noise_hdf5: ["datasets/hdf5/noise_music.hdf5"]
+  rir_hdf5: ["datasets/hdf5/rir.hdf5"]
   sr: 48000
   max_len_s: 5.0
   batch_size: 4
@@ -88,3 +88,16 @@ data_loader:
   hop_size: 480
   nb_erb: 32
   nb_spec: 96
+
+train:
+  epochs: 100
+  lr: 5.0e-4
+  lr_min: 1.0e-5
+  warmup_epochs: 3
+  weight_decay: 0.05
+  grad_clip: 1.0
+  checkpoint_dir: "checkpoints"
+  wandb_project: "lightdfn"
+  log_every_n_steps: 100
+  val_every_n_epochs: 1
+  max_nans: 50

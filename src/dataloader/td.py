@@ -1,7 +1,5 @@
 """Time-domain dataset: loads speech/noise/RIR from HDF5 and mixes them."""
 
-from __future__ import annotations
-
 import bisect
 import logging
 from dataclasses import dataclass

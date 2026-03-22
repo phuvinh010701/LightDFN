@@ -12,9 +12,7 @@ def count_parameters(model: nn.Module) -> int:
     return sum(p.numel() for p in model.parameters() if p.requires_grad)
 
 
-# ============================================================================
 # Audio Statistics and Normalization
-# ============================================================================
 
 
 def rms(values: Union[np.ndarray, Tensor]) -> float:
@@ -95,9 +93,7 @@ def normalize_audio(
     return normalized.astype(np.float32)
 
 
-# ============================================================================
 # SNR-Based Mixing
-# ============================================================================
 
 
 def mix_f(clean: np.ndarray, noise: np.ndarray, snr_db: float) -> float:
@@ -213,9 +209,7 @@ def mix_audio_signal(
     return clean_out, noise_out, mixture
 
 
-# ============================================================================
 # Multi-Noise Combining
-# ============================================================================
 
 
 def combine_noises(
@@ -306,9 +300,7 @@ def combine_noises(
     return combined.astype(np.float32)
 
 
-# ============================================================================
 # Gain Application
-# ============================================================================
 
 
 def apply_gain(signal: np.ndarray, gain_db: float) -> np.ndarray:
@@ -364,9 +356,7 @@ def apply_gain_with_clipping_protection(
     return gained.astype(np.float32)
 
 
-# ============================================================================
 # Bandwidth Estimation
-# ============================================================================
 
 
 def rfftfreqs(n: int, sr: int) -> np.ndarray:

@@ -1,7 +1,6 @@
-from __future__ import annotations
-
 import h5py
 import numpy as np
+
 from src.types import AudioDatasetType
 
 
@@ -103,4 +102,4 @@ if __name__ == "__main__":
     speech_dataset = Hdf5Dataset(speech_hdf5_path)
     print(speech_dataset)
     print(speech_dataset[0])
-    assert type(speech_dataset[0]) == np.ndarray
+    assert isinstance(speech_dataset[0], np.ndarray)

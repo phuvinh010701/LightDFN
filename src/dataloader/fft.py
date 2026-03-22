@@ -1,7 +1,5 @@
 """FFT dataset: wraps TdDataset and adds frequency-domain features."""
 
-from __future__ import annotations
-
 import torch
 from torch import Tensor
 from torch.utils.data import Dataset

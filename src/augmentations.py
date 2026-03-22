@@ -11,11 +11,8 @@ from torch_audiomentations.utils.object_dict import ObjectDict
 from src.configs.config import AugmentationConfig
 from src.utils.io import resample
 
-
-# ============================================================================
 # Biquad coefficient helpers (Audio EQ Cookbook)
 # All return (b, a) as plain Python float lists [b0, b1, b2], [a0=1, a1, a2]
-# ============================================================================
 
 
 def _lowpass_coefs(
@@ -182,9 +179,7 @@ def biquad_norm(x: Tensor, b: Tensor, a: Tensor) -> Tensor:
     return y
 
 
-# ============================================================================
 # Augmentation 1: RandRemoveDc
-# ============================================================================
 
 
 class RandRemoveDc(BaseWaveformTransform):
@@ -216,9 +211,7 @@ class RandRemoveDc(BaseWaveformTransform):
         )
 
 
-# ============================================================================
 # Augmentation 2: RandLFilt
-# ============================================================================
 
 
 class RandLFilt(BaseWaveformTransform):
@@ -275,9 +268,7 @@ class RandLFilt(BaseWaveformTransform):
         )
 
 
-# ============================================================================
 # Augmentation 3: RandBiquadFilter
-# ============================================================================
 
 _BIQUAD_FILTER_TYPES = [
     "lowpass",
@@ -400,9 +391,7 @@ class RandBiquadFilter(BaseWaveformTransform):
         )
 
 
-# ============================================================================
 # Augmentation 4: RandResample
-# ============================================================================
 
 
 class RandResample(BaseWaveformTransform):
@@ -467,9 +456,7 @@ class RandResample(BaseWaveformTransform):
         )
 
 
-# ============================================================================
 # Augmentation 5: RandClipping
-# ============================================================================
 
 
 class RandClipping(BaseWaveformTransform):
@@ -522,9 +509,7 @@ class RandClipping(BaseWaveformTransform):
         )
 
 
-# ============================================================================
 # Augmentation 6: RandZeroingTD
-# ============================================================================
 
 
 class RandZeroingTD(BaseWaveformTransform):
@@ -593,9 +578,7 @@ class RandZeroingTD(BaseWaveformTransform):
         )
 
 
-# ============================================================================
 # Augmentation 7: BandwidthLimiterAugmentation
-# ============================================================================
 
 
 class BandwidthLimiterAugmentation(BaseWaveformTransform):
@@ -668,9 +651,7 @@ class BandwidthLimiterAugmentation(BaseWaveformTransform):
         )
 
 
-# ============================================================================
 # Augmentation 8: AirAbsorptionAugmentation
-# ============================================================================
 
 # ISO 9613-1 air absorption coefficients (×1e-3, units m⁻¹) for 9 frequency bands.
 # 8 scenarios covering different temperature / humidity combinations.
@@ -789,9 +770,7 @@ class AirAbsorptionAugmentation(BaseWaveformTransform):
         )
 
 
-# ============================================================================
 # Augmentation 9: RandReverbSim
-# ============================================================================
 
 
 class RandReverbSim(BaseWaveformTransform):
@@ -920,20 +899,14 @@ class RandReverbSim(BaseWaveformTransform):
         )
 
 
-# ============================================================================
 # Augmentation 10: NoiseGenerator (Colored Noise)
-# ============================================================================
-
 
 # NoiseGenerator is provided directly by torch_audiomentations as AddColoredNoise.
 # It supports the same f_decay range and SNR-based mixing, and is used via the
 # get_noise_generator() factory below.
 NoiseGenerator = AddColoredNoise
 
-
-# ============================================================================
 # Pipeline factory helpers
-# ============================================================================
 
 
 def get_speech_augmentations(
@@ -1041,9 +1014,7 @@ def get_noise_generator(
     )
 
 
-# ============================================================================
 # Quick smoke-test  (python -m src.augmentations)
-# ============================================================================
 
 if __name__ == "__main__":
     print("Testing augmentations (batch=2, channels=1, samples=48000) ...")

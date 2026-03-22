@@ -122,9 +122,18 @@ def run_epoch(
             enhanced, mask, lsnr, _ = model(model_input, feat_erb, feat_spec)
 
             snrs = torch.from_numpy(batch.snr).float().to(device, non_blocking=True)
+            max_freq = torch.from_numpy(batch.max_freq).to(device, non_blocking=True)
 
             try:
-                loss = loss_fn(spec_clean, spec_noisy, enhanced, mask, lsnr, snrs)
+                loss = loss_fn(
+                    spec_clean,
+                    spec_noisy,
+                    enhanced,
+                    mask,
+                    lsnr,
+                    snrs,
+                    max_freq=max_freq,
+                )
             except Exception as e:
                 msg = str(e).lower()
                 if "nan" in msg or "finite" in msg:

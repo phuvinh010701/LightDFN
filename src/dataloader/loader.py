@@ -177,6 +177,8 @@ class DataLoaderBuilder:
                 nb_erb=self.loader_config.nb_erb,
                 nb_spec=self.loader_config.nb_spec,
                 sr=self.loader_config.sr,
+                min_nb_freqs=self.loader_config.min_nb_freqs,
+                norm_tau=self.loader_config.norm_tau,
             )
 
         return DeepFilterNetDataLoader(

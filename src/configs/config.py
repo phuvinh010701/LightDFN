@@ -108,6 +108,10 @@ class DataLoaderConfig:
     hop_size: int = 480
     nb_erb: int = 32
     nb_spec: int = 96
+    # Must match ModelConfig.min_nb_freqs so feature and model ERB filterbanks agree
+    min_nb_freqs: int = 2
+    # Exponential decay time-constant (seconds) for running feature normalization
+    norm_tau: float = 1.0
 
 
 @dataclass

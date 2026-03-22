@@ -268,18 +268,42 @@ class MaskLoss(nn.Module):
         mask = self._to_erb(mask)  # [B, 1, T, E]
         return mask.clamp_min(self.eps).pow(self.gamma)
 
-    def forward(self, input: Tensor, clean: Tensor, noisy: Tensor) -> Tensor:
-        """
+    def forward(
+        self,
+        input: Tensor,
+        clean: Tensor,
+        noisy: Tensor,
+        max_freq_bin: Tensor | None = None,
+    ) -> Tensor:
+        """Compute ERB mask loss, optionally masking out above-bandwidth ERB bands.
+
         Args:
-            input: Predicted ERB mask  [B, 1, T, E]
-            clean: Clean spectrum      [B, 1, T, F, 2]
-            noisy: Noisy spectrum      [B, 1, T, F, 2]
+            input:        Predicted ERB mask  ``[B, 1, T, E]``.
+            clean:        Clean spectrum      ``[B, 1, T, F, 2]``.
+            noisy:        Noisy spectrum      ``[B, 1, T, F, 2]``.
+            max_freq_bin: Per-sample STFT frequency bin cutoff ``[B]``.  ERB bands
+                whose highest frequency bin exceeds this value are excluded from
+                the loss.  ``None`` means all bands are active (no clipping).
         """
         g_t = self._target_mask(clean, noisy)  # [B, 1, T, E]
         g_p = input.clamp_min(self.eps).pow(self.gamma_pred)  # [B, 1, T, E]
         tmp = g_t.sub(g_p).pow(2)
         if self.f_under != 1:
             tmp = tmp * torch.where(g_p < g_t, self.f_under, 1.0)
+
+        if max_freq_bin is not None:
+            # erb_fb: [F, E] — project per-sample freq cutoff to ERB bands.
+            # A band is active if at least one of its frequency bins is within
+            # the signal bandwidth.
+            F = self.erb_fb.shape[0]
+            freq_idx = torch.arange(F, device=self.erb_fb.device)  # [F]
+            # [B, F]: True where bin index < per-sample cutoff
+            freq_active = freq_idx.unsqueeze(0) < max_freq_bin.unsqueeze(1)
+            # [B, E]: True if band has ≥1 active bin (inner product > 0)
+            band_active = (freq_active.float() @ self.erb_fb) > 0
+            # Broadcast [B, 1, 1, E] over [B, 1, T, E]
+            tmp = tmp * band_active[:, None, None, :]
+
         loss = torch.zeros((), device=input.device)
         for power, fac in zip(self.powers, self.factors):
             loss = (
@@ -411,6 +435,9 @@ class Loss(nn.Module):
         lsnr_min: int,
         lsnr_max: int,
     ):
+        # Stored for Hz → frequency-bin conversion in forward()
+        self.fft_size = fft_size
+        self.sr = sr
         super().__init__()
         self.store_losses = False
         self.summaries: dict[str, list[Tensor]] = defaultdict(list)
@@ -486,6 +513,7 @@ class Loss(nn.Module):
         mask: Tensor,
         lsnr: Tensor,
         snrs: Tensor,
+        max_freq: Tensor | None = None,
     ) -> Tensor:
         """Compute the combined training loss.
 
@@ -496,6 +524,9 @@ class Loss(nn.Module):
             mask:     Predicted ERB mask       [B, 1, T, E]
             lsnr:     Predicted local SNR      [B, T, 1]
             snrs:     Per-sample input SNRs    [B]
+            max_freq: Per-sample signal bandwidth in Hz ``[B]``.  Used to
+                restrict the mask loss to frequency bins within bandwidth.
+                ``None`` means full bandwidth (no clipping).
         """
         noise = noisy - clean
         lsnr_gt = self.lsnr_target(clean, noise)  # [B, T]
@@ -503,7 +534,13 @@ class Loss(nn.Module):
         ml = sl = mrsl = sdrl = lsnrl = torch.zeros((), device=clean.device)
 
         if self.ml is not None:
-            ml = self.ml(mask, clean, noisy)
+            # Convert Hz bandwidth to STFT frequency-bin index
+            max_freq_bin: Tensor | None = None
+            if max_freq is not None:
+                max_freq_bin = (
+                    max_freq.float().to(clean.device) * self.fft_size / self.sr
+                ).long()
+            ml = self.ml(mask, clean, noisy, max_freq_bin=max_freq_bin)
 
         if self.sl is not None:
             sl = self.sl(enhanced, clean)

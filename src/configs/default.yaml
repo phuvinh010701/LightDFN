@@ -88,6 +88,8 @@ data_loader:
   hop_size: 480
   nb_erb: 32
   nb_spec: 96
+  min_nb_freqs: 2   # must match model.min_nb_freqs
+  norm_tau: 1.0     # running-mean decay time-constant in seconds
 
 train:
   epochs: 100

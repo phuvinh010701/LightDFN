@@ -3,6 +3,7 @@ from typing import Optional
 
 import torch
 import torch.nn.functional as F
+from loguru import logger
 from torch import Tensor
 from torch_audiomentations import AddColoredNoise, Compose
 from torch_audiomentations.core.transforms_interface import BaseWaveformTransform
@@ -1017,7 +1018,7 @@ def get_noise_generator(
 # Quick smoke-test  (python -m src.augmentations)
 
 if __name__ == "__main__":
-    print("Testing augmentations (batch=2, channels=1, samples=48000) ...")
+    logger.info("Testing augmentations (batch=2, channels=1, samples=48000) ...")
 
     audio = torch.randn(2, 1, 48000, dtype=torch.float32) * 0.1
 
@@ -1045,11 +1046,11 @@ if __name__ == "__main__":
         try:
             result = aug(audio, sample_rate=48000)
             shape = result.samples.shape if hasattr(result, "samples") else result.shape
-            print(f"  ok  {name}: {shape}")
+            logger.info(f"  ok  {name}: {shape}")
         except Exception as exc:
-            print(f"  ERR {name}: {exc}")
+            logger.error(f"  ERR {name}: {exc}")
 
-    print("\nPipelines ...")
+    logger.info("Pipelines ...")
     cfg = AugmentationConfig()
     for name, pipeline in [
         ("get_speech_augmentations", get_speech_augmentations(cfg)),
@@ -1060,8 +1061,8 @@ if __name__ == "__main__":
         try:
             result = pipeline(audio, sample_rate=48000)
             shape = result.samples.shape if hasattr(result, "samples") else result.shape
-            print(f"  ok  {name}: {shape}")
+            logger.info(f"  ok  {name}: {shape}")
         except Exception as exc:
-            print(f"  ERR {name}: {exc}")
+            logger.error(f"  ERR {name}: {exc}")
 
-    print("\nDone.")
+    logger.info("Done.")

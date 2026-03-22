@@ -2,6 +2,7 @@
 
 import numpy as np
 import torch
+from loguru import logger
 from torch import Tensor
 
 
@@ -133,26 +134,30 @@ if __name__ == "__main__":
     nb_erb = 32
     min_nb_freqs = 2
 
-    print("Generating ERB filterbank:")
-    print(f"  Sample rate: {sr} Hz")
-    print(f"  FFT size: {fft_size}")
-    print(f"  ERB bands: {nb_erb}")
+    logger.info("Generating ERB filterbank:")
+    logger.info(f"  Sample rate: {sr} Hz")
+    logger.info(f"  FFT size: {fft_size}")
+    logger.info(f"  ERB bands: {nb_erb}")
 
     widths = erb_fb_widths(sr, fft_size, nb_erb, min_nb_freqs)
-    print(f"\nERB widths: {widths}")
-    print(f"Total frequency bins: {np.sum(widths)} (expected: {fft_size // 2 + 1})")
+    logger.info(f"ERB widths: {widths}")
+    logger.info(
+        f"Total frequency bins: {np.sum(widths)} (expected: {fft_size // 2 + 1})"
+    )
 
     erb_fb, erb_inv_fb = get_erb_filterbanks(sr, fft_size, nb_erb, min_nb_freqs)
-    print(f"\nERB filterbank shape: {erb_fb.shape}")
-    print(f"ERB inverse filterbank shape: {erb_inv_fb.shape}")
+    logger.info(f"ERB filterbank shape: {erb_fb.shape}")
+    logger.info(f"ERB inverse filterbank shape: {erb_inv_fb.shape}")
 
     # Verify reconstruction
     test_input = torch.randn(481, 1)
     erb_features = (test_input.T @ erb_fb).T  # [32, 1]
     reconstructed = (erb_features.T @ erb_inv_fb).T  # [481, 1]
 
-    print("\nTest reconstruction:")
-    print(f"  Input shape: {test_input.shape}")
-    print(f"  ERB features shape: {erb_features.shape}")
-    print(f"  Reconstructed shape: {reconstructed.shape}")
-    print(f"  Reconstruction error: {(test_input - reconstructed).abs().mean():.6f}")
+    logger.info("Test reconstruction:")
+    logger.info(f"  Input shape: {test_input.shape}")
+    logger.info(f"  ERB features shape: {erb_features.shape}")
+    logger.info(f"  Reconstructed shape: {reconstructed.shape}")
+    logger.info(
+        f"  Reconstruction error: {(test_input - reconstructed).abs().mean():.6f}"
+    )

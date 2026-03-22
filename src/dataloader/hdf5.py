@@ -1,5 +1,6 @@
 import h5py
 import numpy as np
+from loguru import logger
 
 from src.types import AudioDatasetType
 
@@ -100,6 +101,6 @@ if __name__ == "__main__":
     speech_hdf5_path = "datasets/hdf5/speech_clean.hdf5"
 
     speech_dataset = Hdf5Dataset(speech_hdf5_path)
-    print(speech_dataset)
-    print(speech_dataset[0])
+    logger.info(speech_dataset)
+    logger.info(speech_dataset[0])
     assert isinstance(speech_dataset[0], np.ndarray)

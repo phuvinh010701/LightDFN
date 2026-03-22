@@ -7,6 +7,7 @@ based on DeepFilterNet3 that replaces all GRU layers with Li-GRU layers for impr
 from functools import partial
 
 import torch
+from loguru import logger
 from torch import Tensor, nn
 from typing_extensions import Final
 
@@ -610,9 +611,9 @@ if __name__ == "__main__":
     with torch.no_grad():
         enhanced_spec, erb_feat, lsnr, df_coefs = model(spec, feat_erb, feat_spec)
 
-    print("Forward pass OK")
-    print(f"   enhanced_spec: {list(enhanced_spec.shape)}")
-    print(f"   erb_feat: {list(erb_feat.shape)}")
-    print(f"   lsnr: {list(lsnr.shape)}")
-    print(f"   df_coefs: {list(df_coefs.shape)}")
-    print(f"Number of parameters: {count_parameters(model)}")
+    logger.info("Forward pass OK")
+    logger.info(f"  enhanced_spec: {list(enhanced_spec.shape)}")
+    logger.info(f"  erb_feat: {list(erb_feat.shape)}")
+    logger.info(f"  lsnr: {list(lsnr.shape)}")
+    logger.info(f"  df_coefs: {list(df_coefs.shape)}")
+    logger.info(f"Number of parameters: {count_parameters(model)}")

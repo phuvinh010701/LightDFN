@@ -195,11 +195,11 @@ if __name__ == "__main__":
     )
     builder = DataLoaderBuilder(data_loader_config)
 
-    print("=== FftDataset (training) smoke test ===")
+    logger.info("FftDataset (training) smoke test")
     loader = builder.build(
         split="train", aug_config=augmentation_config
     )  # use_fft=True by default
-    print("Built dataloader OK")
+    logger.info("Built dataloader OK")
 
     max_samples = int(data_loader_config.max_len_s * data_loader_config.sr)
     n_frames = (
@@ -211,9 +211,9 @@ if __name__ == "__main__":
         assert batch.feat_spec.shape[-2:] == (n_frames, data_loader_config.nb_spec)
         assert not torch.isnan(batch.feat_erb).any()
         assert not torch.isnan(batch.feat_spec.real).any()
-        print(
+        logger.info(
             f"  batch {i:03d} | speech {tuple(batch.speech.shape)} | snr {batch.snr.tolist()} | gain {batch.gain.tolist()}"
         )
-    print("  ✓ all batches OK")
+    logger.info("all batches OK")
 
-    print("\nAll smoke tests passed.")
+    logger.info("All smoke tests passed.")

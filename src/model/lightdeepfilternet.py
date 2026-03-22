@@ -5,7 +5,6 @@ based on DeepFilterNet3 that replaces all GRU layers with Li-GRU layers for impr
 """
 
 from functools import partial
-from typing import Optional, Tuple
 
 import torch
 from torch import Tensor, nn
@@ -29,9 +28,14 @@ eps = 1e-12
 
 
 class LightEncoder(nn.Module):
-    """Encoder module with Li-GRU for LightDeepFilterNet."""
+    """Encoder module with Li-GRU for LightDeepFilterNet.
 
-    def __init__(self, config: ModelConfig):
+    Args:
+        config (ModelConfig): Model architecture configuration.
+    """
+
+    def __init__(self, config: ModelConfig) -> None:
+        """Initialise LightEncoder layers."""
         super().__init__()
         assert config.nb_erb % 4 == 0, "erb_bins should be divisible by 4"
 
@@ -109,10 +113,17 @@ class LightEncoder(nn.Module):
 
     def forward(
         self, feat_erb: Tensor, feat_spec: Tensor
-    ) -> Tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]:
-        # Encodes erb; erb should be in dB scale + normalized; Fe are number of erb bands.
-        # erb: [B, 1, T, Fe]
-        # spec: [B, 2, T, Fc]
+    ) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]:
+        """Encode ERB and complex spectrogram features into embeddings and LSNR estimate.
+
+        Args:
+            feat_erb (Tensor): ERB features in dB scale, shape ``[B, 1, T, Fe]``.
+            feat_spec (Tensor): Complex spectrogram features, shape ``[B, 2, T, Fc]``.
+
+        Returns:
+            tuple[Tensor, ...]: ``(e0, e1, e2, e3, emb, c0, lsnr)`` encoder activations
+            and local SNR estimate of shape ``[B, T, 1]``.
+        """
         e0 = self.erb_conv0(feat_erb)  # [B, C, T, F]
         e1 = self.erb_conv1(e0)  # [B, C*2, T, F/2]
         e2 = self.erb_conv2(e1)  # [B, C*4, T, F/4]
@@ -120,11 +131,7 @@ class LightEncoder(nn.Module):
         c0 = self.df_conv0(feat_spec)  # [B, C, T, Fc]
         c1 = self.df_conv1(c0)  # [B, C*2, T, Fc/2]
 
-        # Debug shapes (disabled)
-        # print(f"c1 shape before permute: {c1.shape}")
         cemb = c1.permute(0, 2, 3, 1).flatten(2)  # [B, T, -1]
-        # print(f"cemb shape after flatten: {cemb.shape}, expected last dim: {self.emb_in_dim}")
-
         cemb = self.df_fc_emb(cemb)  # [T, B, C * F/4]
         emb = e3.permute(0, 2, 3, 1).flatten(2)  # [B, T, C * F]
         emb = self.combine(emb, cemb)
@@ -134,9 +141,14 @@ class LightEncoder(nn.Module):
 
 
 class LightErbDecoder(nn.Module):
-    """ERB Decoder module with Li-GRU for LightDeepFilterNet."""
+    """ERB Decoder module with Li-GRU for LightDeepFilterNet.
 
-    def __init__(self, config: ModelConfig):
+    Args:
+        config (ModelConfig): Model architecture configuration.
+    """
+
+    def __init__(self, config: ModelConfig) -> None:
+        """Initialise LightErbDecoder layers."""
         super().__init__()
         assert config.nb_erb % 8 == 0, "erb_bins should be divisible by 8"
 
@@ -159,7 +171,6 @@ class LightErbDecoder(nn.Module):
         else:
             raise NotImplementedError()
 
-        # Using Li-GRU instead of standard GRU
         self.emb_gru = SqueezedLiGRU_S(
             self.emb_in_dim,
             self.emb_dim,
@@ -202,7 +213,18 @@ class LightErbDecoder(nn.Module):
     def forward(
         self, emb: Tensor, e3: Tensor, e2: Tensor, e1: Tensor, e0: Tensor
     ) -> Tensor:
-        # Estimates erb mask
+        """Decode encoder activations into an ERB gain mask.
+
+        Args:
+            emb (Tensor): Shared embedding from the encoder, shape ``[B, T, emb_dim]``.
+            e3 (Tensor): Encoder skip connection at stride 4, shape ``[B, C, T, F/4]``.
+            e2 (Tensor): Encoder skip connection at stride 2, shape ``[B, C, T, F/2]``.
+            e1 (Tensor): Encoder skip connection at stride 1, shape ``[B, C, T, F]``.
+            e0 (Tensor): Encoder input features, shape ``[B, C, T, F]``.
+
+        Returns:
+            Tensor: ERB gain mask of shape ``[B, 1, T, nb_erb]``.
+        """
         b, _, t, f8 = e3.shape
         emb, _ = self.emb_gru(emb)
         emb = emb.view(b, t, f8, -1).permute(0, 3, 1, 2)  # [B, C*8, T, F/8]
@@ -217,14 +239,27 @@ class LightDfOutputReshapeMF(nn.Module):
     """Coefficients output reshape for multiframe/MultiFrameModule.
 
     Requires input of shape B, C, T, F, 2.
+
+    Args:
+        df_order (int): Deep filtering order (number of filter taps).
+        df_bins (int): Number of frequency bins processed by deep filtering.
     """
 
-    def __init__(self, df_order: int, df_bins: int):
+    def __init__(self, df_order: int, df_bins: int) -> None:
+        """Initialise LightDfOutputReshapeMF."""
         super().__init__()
         self.df_order = df_order
         self.df_bins = df_bins
 
     def forward(self, coefs: Tensor) -> Tensor:
+        """Reshape raw DF output into complex coefficient tensors.
+
+        Args:
+            coefs (Tensor): Raw coefficients of shape ``[B, T, F, O*2]``.
+
+        Returns:
+            Tensor: Reshaped coefficients of shape ``[B, O, T, F, 2]``.
+        """
         # [B, T, F, O*2] -> [B, O, T, F, 2]
         new_shape = list(coefs.shape)
         new_shape[-1] = -1
@@ -235,9 +270,14 @@ class LightDfOutputReshapeMF(nn.Module):
 
 
 class LightDfDecoder(nn.Module):
-    """Deep Filtering Decoder with Li-GRU."""
+    """Deep Filtering Decoder with Li-GRU.
 
-    def __init__(self, config: ModelConfig):
+    Args:
+        config (ModelConfig): Model architecture configuration.
+    """
+
+    def __init__(self, config: ModelConfig) -> None:
+        """Initialise LightDfDecoder layers."""
         super().__init__()
         layer_width = config.conv_ch
 
@@ -256,7 +296,6 @@ class LightDfDecoder(nn.Module):
             layer_width, self.df_out_ch, fstride=1, kernel_size=(kt, 1)
         )
 
-        # Using Li-GRU instead of standard GRU
         self.df_gru = SqueezedLiGRU_S(
             self.emb_in_dim,
             self.emb_dim,
@@ -268,7 +307,7 @@ class LightDfDecoder(nn.Module):
         )
         config.df_gru_skip = config.df_gru_skip.lower()
         assert config.df_gru_skip in ("none", "identity", "groupedlinear")
-        self.df_skip: Optional[nn.Module]
+        self.df_skip: nn.Module | None
         if config.df_gru_skip == "none":
             self.df_skip = None
         elif config.df_gru_skip == "identity":
@@ -291,6 +330,15 @@ class LightDfDecoder(nn.Module):
         self.df_fc_a = nn.Sequential(nn.Linear(self.df_n_hidden, 1), nn.Sigmoid())
 
     def forward(self, emb: Tensor, c0: Tensor) -> Tensor:
+        """Compute per-frequency DF filter coefficients.
+
+        Args:
+            emb (Tensor): Shared encoder embedding, shape ``[B, T, emb_dim]``.
+            c0 (Tensor): DF pathway conv features, shape ``[B, C, T, Fc]``.
+
+        Returns:
+            Tensor: DF coefficients of shape ``[B, T, nb_df, df_order*2]``.
+        """
         b, t, _ = emb.shape
         c, _ = self.df_gru(emb)  # [B, T, H], H: df_n_hidden
         if self.df_skip is not None:
@@ -302,14 +350,20 @@ class LightDfDecoder(nn.Module):
 
 
 class LightDeepFilteringModule(nn.Module):
-    """Optimized deep filtering using unfold + einsum"""
+    """Optimized deep filtering using unfold + einsum.
 
-    def __init__(self, num_freqs: int, frame_size: int, lookahead: int = 0):
+    Args:
+        num_freqs (int): Number of frequency bins to filter (``nb_df``).
+        frame_size (int): Multi-frame filter order.
+        lookahead (int): Number of future frames visible to the filter.
+    """
+
+    def __init__(self, num_freqs: int, frame_size: int, lookahead: int = 0) -> None:
+        """Initialise LightDeepFilteringModule."""
         super().__init__()
         self.num_freqs = num_freqs
         self.frame_size = frame_size
         self.lookahead = lookahead
-        # Padding for multi-frame filtering
         self.pad = nn.ConstantPad2d((0, 0, frame_size - 1 - lookahead, lookahead), 0.0)
 
     def forward(self, spec: Tensor, coefs: Tensor) -> Tensor:
@@ -369,11 +423,20 @@ class LightDeepFilterNet(nn.Module):
     def __init__(
         self,
         config: ModelConfig,
-        erb_fb_tensor: Optional[Tensor] = None,
-        erb_inv_fb_tensor: Optional[Tensor] = None,
+        erb_fb_tensor: Tensor | None = None,
+        erb_inv_fb_tensor: Tensor | None = None,
         run_df: bool = True,
         train_mask: bool = True,
-    ):
+    ) -> None:
+        """Initialise LightDeepFilterNet.
+
+        Args:
+            config (ModelConfig): Model architecture configuration.
+            erb_fb_tensor (Tensor | None): Pre-computed ERB filterbank matrix.
+            erb_inv_fb_tensor (Tensor | None): Pre-computed inverse ERB filterbank matrix.
+            run_df (bool): Whether to run the deep filtering branch.
+            train_mask (bool): Whether to train the ERB mask decoder.
+        """
         super().__init__()
         layer_width = config.conv_ch
         assert config.nb_erb % 8 == 0, "erb_bins should be divisible by 8"
@@ -426,7 +489,7 @@ class LightDeepFilterNet(nn.Module):
         spec: Tensor,
         feat_erb: Tensor,
         feat_spec: Tensor,
-    ) -> Tuple[Tensor, Tensor, Tensor, Tensor]:
+    ) -> tuple[Tensor, Tensor, Tensor, Tensor]:
         """Forward method of DeepFilterNet3 with Li-GRU.
 
         Args:
@@ -500,8 +563,19 @@ class LightDeepFilterNet(nn.Module):
         return spec_e, m, lsnr, df_coefs
 
 
-def init_model(model_config: ModelConfig, run_df: bool = True, train_mask: bool = True):
-    # Generate proper ERB filterbanks
+def init_model(
+    model_config: ModelConfig, run_df: bool = True, train_mask: bool = True
+) -> LightDeepFilterNet:
+    """Build and move a :class:`LightDeepFilterNet` to the available device.
+
+    Args:
+        model_config (ModelConfig): Model architecture configuration.
+        run_df (bool): Whether to enable the deep filtering branch.
+        train_mask (bool): Whether to train the ERB mask decoder.
+
+    Returns:
+        LightDeepFilterNet: Initialised model on the target device.
+    """
     erb_fb_tensor, erb_inv_fb_tensor = get_erb_filterbanks(
         sr=model_config.sr,
         fft_size=model_config.fft_size,
@@ -516,12 +590,11 @@ def init_model(model_config: ModelConfig, run_df: bool = True, train_mask: bool 
 
 
 if __name__ == "__main__":
-    """Simple test for LightDeepFilterNet forward pass."""
-    # Init model
+    # Simple test for LightDeepFilterNet forward pass.
     from src.configs.config import load_config
     from src.utils.utils import count_parameters
 
-    model_config, _, _ = load_config()
+    model_config, _, _, _ = load_config()
 
     model = init_model(model_config)
     model.eval()

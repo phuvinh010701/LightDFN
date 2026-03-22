@@ -26,9 +26,7 @@ class _Angle(torch.autograd.Function):
     def backward(ctx, grad: Tensor) -> Tensor:  # type: ignore[override]
         (x,) = ctx.saved_tensors
         inv = grad / (x.real.square() + x.imag.square()).clamp_min_(1e-10)
-        return torch.view_as_complex(
-            torch.stack((-x.imag * inv, x.real * inv), dim=-1)
-        )
+        return torch.view_as_complex(torch.stack((-x.imag * inv, x.real * inv), dim=-1))
 
 
 angle = _Angle.apply
@@ -107,12 +105,12 @@ def _local_energy(x: Tensor, ws: int, device: torch.device) -> Tensor:
         ws += 1
     ws_half = ws // 2
     energy = x.pow(2).sum(-1)  # [..., F]
-    if energy.dim() == 4:      # [B, 1, T, F]
+    if energy.dim() == 4:  # [B, 1, T, F]
         energy = energy.sum(-1)  # [B, 1, T]
     energy = F.pad(energy, (ws_half, ws_half, 0, 0))
     w = torch.hann_window(ws, device=device, dtype=energy.dtype)
     energy = energy.unfold(-1, ws, 1) * w  # [B, 1, T, ws]
-    return energy.sum(-1).div(ws)           # [B, 1, T]
+    return energy.sum(-1).div(ws)  # [B, 1, T]
 
 
 class LocalSnrTarget(nn.Module):
@@ -142,7 +140,7 @@ class LocalSnrTarget(nn.Module):
         # clean, noise: [B, 1, T, F, 2]
         x_clean = as_real(clean)
         x_noise = as_real(noise)
-        E_speech = _local_energy(x_clean, self.ws, clean.device)    # [B, 1, T]
+        E_speech = _local_energy(x_clean, self.ws, clean.device)  # [B, 1, T]
         E_noise = _local_energy(x_noise, self.ws_ns, clean.device)  # [B, 1, T]
         eps = torch.finfo(clean.dtype).eps
         snr = E_speech / E_noise.clamp_min(eps)
@@ -226,7 +224,11 @@ class SpectralLoss(nn.Module):
             if self.gamma != 1:
                 inp = i_abs * torch.exp(1j * angle(inp))
                 tgt = t_abs * torch.exp(1j * angle(tgt))
-            loss = loss + F.mse_loss(torch.view_as_real(inp), torch.view_as_real(tgt)) * self.f_c
+            loss = (
+                loss
+                + F.mse_loss(torch.view_as_real(inp), torch.view_as_real(tgt))
+                * self.f_c
+            )
         return loss
 
 
@@ -262,8 +264,8 @@ class MaskLoss(nn.Module):
         return torch.matmul(x, self.erb_fb)
 
     def _target_mask(self, clean: Tensor, noisy: Tensor) -> Tensor:
-        mask = self.mask_fn(clean, noisy)   # [B, 1, T, F], values in [0, 1]
-        mask = self._to_erb(mask)           # [B, 1, T, E]
+        mask = self.mask_fn(clean, noisy)  # [B, 1, T, F], values in [0, 1]
+        mask = self._to_erb(mask)  # [B, 1, T, E]
         return mask.clamp_min(self.eps).pow(self.gamma)
 
     def forward(self, input: Tensor, clean: Tensor, noisy: Tensor) -> Tensor:
@@ -273,14 +275,17 @@ class MaskLoss(nn.Module):
             clean: Clean spectrum      [B, 1, T, F, 2]
             noisy: Noisy spectrum      [B, 1, T, F, 2]
         """
-        g_t = self._target_mask(clean, noisy)                 # [B, 1, T, E]
+        g_t = self._target_mask(clean, noisy)  # [B, 1, T, E]
         g_p = input.clamp_min(self.eps).pow(self.gamma_pred)  # [B, 1, T, E]
         tmp = g_t.sub(g_p).pow(2)
         if self.f_under != 1:
             tmp = tmp * torch.where(g_p < g_t, self.f_under, 1.0)
         loss = torch.zeros((), device=input.device)
         for power, fac in zip(self.powers, self.factors):
-            loss = loss + tmp.clamp_min(1e-13).pow(power // 2).mean().mul(fac) * self.factor
+            loss = (
+                loss
+                + tmp.clamp_min(1e-13).pow(power // 2).mean().mul(fac) * self.factor
+            )
         return loss
 
 
@@ -294,7 +299,9 @@ class SiSdr(nn.Module):
         target = target.reshape(-1, t)
         input = input.reshape(-1, t)
         Rss = torch.einsum("bi,bi->b", target, target).unsqueeze(-1)
-        a = torch.einsum("bi,bi->b", target, input).add(eps).unsqueeze(-1) / Rss.add(eps)
+        a = torch.einsum("bi,bi->b", target, input).add(eps).unsqueeze(-1) / Rss.add(
+            eps
+        )
         e_true = a * target
         e_res = input - e_true
         Sss = e_true.square().sum(-1)
@@ -317,7 +324,9 @@ class SdrLoss(nn.Module):
 class SegSdrLoss(nn.Module):
     """Multi-window segmental Si-SDR loss."""
 
-    def __init__(self, window_sizes: list[int], factor: float = 0.2, overlap: float = 0.0):
+    def __init__(
+        self, window_sizes: list[int], factor: float = 0.2, overlap: float = 0.0
+    ):
         super().__init__()
         self.window_sizes = window_sizes
         self.factor = factor
@@ -330,10 +339,13 @@ class SegSdrLoss(nn.Module):
         for ws in self.window_sizes:
             ws = min(ws, input.size(-1))
             hop = max(int(self.hop_ratio * ws), 1)
-            loss = loss + self.sdr(
-                input=input.unfold(-1, ws, hop).reshape(-1, ws),
-                target=target.unfold(-1, ws, hop).reshape(-1, ws),
-            ).mean()
+            loss = (
+                loss
+                + self.sdr(
+                    input=input.unfold(-1, ws, hop).reshape(-1, ws),
+                    target=target.unfold(-1, ws, hop).reshape(-1, ws),
+                ).mean()
+            )
         return -loss * self.factor
 
 
@@ -355,7 +367,7 @@ class LossConfig:
 
     # MaskLoss
     ml_factor: float = 1.0
-    ml_mask: str = "iam"           # "iam" | "irm" | "wg"
+    ml_mask: str = "iam"  # "iam" | "irm" | "wg"
     ml_gamma: float = 0.6
     ml_gamma_pred: float = 0.6
     ml_f_under: float = 2.0

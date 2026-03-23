@@ -117,6 +117,7 @@ def _notch_coefs(
     return [b0 / a0, b1 / a0, b2 / a0], [1.0, a1 / a0, a2 / a0]
 
 
+@torch.jit.script
 def _apply_biquad_batch(samples: Tensor, b: Tensor, a: Tensor) -> Tensor:
     """Apply a biquad IIR filter (Direct Form II Transposed) to a batch of audio.
 
@@ -131,20 +132,18 @@ def _apply_biquad_batch(samples: Tensor, b: Tensor, a: Tensor) -> Tensor:
     B, C, T = samples.shape
     out = torch.zeros_like(samples)
 
-    # Direct Form II Transposed state: mem0, mem1 both (B, C)
     mem0 = samples.new_zeros(B, C)
     mem1 = samples.new_zeros(B, C)
 
-    # Coefficient views for broadcasting over channels
-    b0 = b[:, 0].view(B, 1)  # (B, 1)
+    b0 = b[:, 0].view(B, 1)
     b1 = b[:, 1].view(B, 1)
     b2 = b[:, 2].view(B, 1)
     a1 = a[:, 1].view(B, 1)
     a2 = a[:, 2].view(B, 1)
 
     for t in range(T):
-        x_t = samples[:, :, t]  # (B, C)
-        y_t = b0 * x_t + mem0  # (B, C)
+        x_t = samples[:, :, t]
+        y_t = b0 * x_t + mem0
         mem0 = mem1 + b1 * x_t - a1 * y_t
         mem1 = b2 * x_t - a2 * y_t
         out[:, :, t] = y_t
@@ -152,13 +151,18 @@ def _apply_biquad_batch(samples: Tensor, b: Tensor, a: Tensor) -> Tensor:
     return out
 
 
+@torch.jit.script
 def biquad_norm(x: Tensor, b: Tensor, a: Tensor) -> Tensor:
     """Apply a normalised 2nd-order AR/MA filter (RNNoise/PercepNet form).
 
+    The difference equation is:
+
+    y[t] = x[t] + b[0]*x[t-1] + b[1]*x[t-2] - a[0]*y[t-1] - a[1]*y[t-2]
+
     Args:
         x: Input signal of shape (T,).
-        b: Feedforward coefficients [b0, b1], shape (2,).
-        a: Feedback coefficients [a0, a1], shape (2,).
+        b: Feedforward coefficients [b1, b2], shape (2,).  b0 is implicitly 1.
+        a: Feedback coefficients [a1, a2], shape (2,).  a0 is implicitly 1.
 
     Returns:
         Filtered signal of shape (T,).
@@ -168,11 +172,15 @@ def biquad_norm(x: Tensor, b: Tensor, a: Tensor) -> Tensor:
     y_prev1 = x.new_zeros(())
     y_prev2 = x.new_zeros(())
     x_prev1 = x.new_zeros(())
+    x_prev2 = x.new_zeros(())
 
     for t in range(T):
         x_curr = x[t]
-        y_curr = b[0] * x_curr + b[1] * x_prev1 - a[0] * y_prev1 - a[1] * y_prev2
+        y_curr = (
+            x_curr + b[0] * x_prev1 + b[1] * x_prev2 - a[0] * y_prev1 - a[1] * y_prev2
+        )
         y[t] = y_curr
+        x_prev2 = x_prev1
         x_prev1 = x_curr
         y_prev2 = y_prev1
         y_prev1 = y_curr
@@ -477,7 +485,7 @@ class RandClipping(BaseWaveformTransform):
     def __init__(
         self,
         p: float = 0.2,
-        clip_factor_range: tuple[float, float] = (0.05, 0.9),
+        clip_factor_range: tuple[float, float] = (0.01, 0.25),
     ):
         super().__init__(p=p, output_type="tensor")
         self.clip_factor_range = clip_factor_range
@@ -930,7 +938,6 @@ def get_speech_augmentations(
         RandLFilt(p=augmentation_config.p_lfilt),
         RandBiquadFilter(p=augmentation_config.p_biquad, sample_rate=sample_rate),
         RandResample(p=augmentation_config.p_resample, sample_rate=sample_rate),
-        RandClipping(p=augmentation_config.p_clipping),
     ]
     return Compose(transforms, output_type="tensor")
 
@@ -951,7 +958,9 @@ def get_noise_augmentations(
         ``Compose`` pipeline accepting tensors of shape (B, C, T).
     """
     transforms = [
-        RandClipping(p=augmentation_config.p_noise_clipping),
+        RandClipping(
+            p=augmentation_config.p_noise_clipping, clip_factor_range=(0.01, 0.5)
+        ),
         RandBiquadFilter(p=augmentation_config.p_noise_biquad, sample_rate=sample_rate),
     ]
     return Compose(transforms, output_type="tensor")
@@ -973,12 +982,13 @@ def get_speech_distortions_td(
         ``Compose`` pipeline accepting tensors of shape (B, C, T).
     """
     transforms = [
+        RandClipping(p=augmentation_config.p_clipping, clip_factor_range=(0.05, 0.9)),
         RandZeroingTD(p=augmentation_config.p_zeroing),
         AirAbsorptionAugmentation(
             p=augmentation_config.p_air_absorption, sample_rate=sample_rate
         ),
         BandwidthLimiterAugmentation(
-            p=augmentation_config.p_bandwidth_limit, sample_rate=sample_rate
+            p=augmentation_config.p_bandwidth_ext, sample_rate=sample_rate
         ),
     ]
     return Compose(transforms, output_type="tensor")

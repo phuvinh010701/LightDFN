@@ -8,7 +8,7 @@ import numpy as np
 import torch
 from loguru import logger
 from torch import Tensor
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader, Dataset, Sampler
 
 from src.configs.config import AugmentationConfig, DataLoaderConfig
 from src.dataloader.dataset_config import DatasetEntry
@@ -80,15 +80,39 @@ def collate_fn(samples: list[Sample]) -> DsBatch:
     )
 
 
+class _EpochShuffleSampler(Sampler):
+    """Reproducibly shuffle indices per epoch without recreating the DataLoader."""
+
+    def __init__(self, n: int, seed: int = 42) -> None:
+        self._n = n
+        self._seed = seed
+        self._epoch = 0
+
+    def set_epoch(self, epoch: int) -> None:
+        self._epoch = epoch
+
+    def __iter__(self) -> Iterator[int]:
+        g = torch.Generator()
+        g.manual_seed(self._seed + self._epoch)
+        yield from torch.randperm(self._n, generator=g).tolist()
+
+    def __len__(self) -> int:
+        return self._n
+
+
 class DeepFilterNetDataLoader:
     """Thin wrapper around :class:`~torch.utils.data.DataLoader` with epoch seeding.
 
     Call :meth:`start_epoch` before iterating to reproducibly shuffle each epoch.
+    The underlying DataLoader is created once and reused across epochs via
+    :class:`_EpochShuffleSampler`, avoiding the worker restart overhead of
+    recreating the DataLoader every epoch.
 
     Args:
         dataset:     A :class:`TdDataset` or :class:`FftDataset`.
         batch_size:  Number of samples per batch.
         num_workers: DataLoader worker processes.
+        num_prefetch_batches: Total batches to prefetch across all workers.
         seed:        Base seed; epoch ``e`` uses ``seed + e``.
     """
 
@@ -97,35 +121,41 @@ class DeepFilterNetDataLoader:
         dataset: Dataset,
         batch_size: int = 4,
         num_workers: int = 0,
+        num_prefetch_batches: int = 8,
         seed: int = 42,
     ) -> None:
         self.dataset = dataset
         self.batch_size = batch_size
         self.num_workers = num_workers
+        self.num_prefetch_batches = num_prefetch_batches
         self.seed = seed
-        self._loader: DataLoader | None = None
+        self._sampler = _EpochShuffleSampler(len(dataset), seed=seed)  # type: ignore[arg-type]
+        prefetch = (
+            max(1, math.ceil(num_prefetch_batches / max(num_workers, 1)))
+            if num_workers > 0
+            else None
+        )
+        self._loader: DataLoader = DataLoader(
+            dataset,
+            batch_size=batch_size,
+            sampler=self._sampler,
+            num_workers=num_workers,
+            prefetch_factor=prefetch,
+            persistent_workers=num_workers > 0,
+            pin_memory=True,
+            collate_fn=collate_fn,
+        )
 
     def __len__(self) -> int:
         return math.ceil(len(self.dataset) / self.batch_size)  # type: ignore[arg-type]
 
     def start_epoch(self, epoch_idx: int) -> None:
-        """Re-seed the DataLoader for the given epoch index."""
-        g = torch.Generator()
-        g.manual_seed(self.seed + epoch_idx)
+        """Reseed the sampler for the given epoch index."""
         logger.debug(f"Seeding DataLoader with seed {self.seed + epoch_idx}")
-        self._loader = DataLoader(
-            self.dataset,
-            batch_size=self.batch_size,
-            shuffle=True,
-            num_workers=self.num_workers,
-            collate_fn=collate_fn,
-            generator=g,
-        )
+        self._sampler.set_epoch(epoch_idx)
 
     def __iter__(self) -> Iterator[DsBatch]:
         """Return an iterator over batches, initialising epoch 0 if needed."""
-        if self._loader is None:
-            self.start_epoch(0)
         return iter(self._loader)  # type: ignore[arg-type]
 
 
@@ -154,8 +184,9 @@ class DataLoaderBuilder:
         """
 
         def _entries(paths: list[str]) -> list[DatasetEntry]:
-            """Wrap plain path strings into DatasetEntry objects with unit sampling."""
-            return [DatasetEntry(path=p, sampling_factor=1.0) for p in paths]
+            """Wrap plain path strings into DatasetEntry objects, scaled by global_ds_sampling_f."""
+            f = self.loader_config.global_ds_sampling_f
+            return [DatasetEntry(path=p, sampling_factor=f) for p in paths]
 
         td_dataset = TdDataset(
             speech_files=_entries(self.loader_config.speech_hdf5),
@@ -165,6 +196,7 @@ class DataLoaderBuilder:
             split=split,
             sr=self.loader_config.sr,
             max_len_s=self.loader_config.max_len_s,
+            snrs=self.loader_config.dataloader_snrs,
             seed=self.loader_config.seed,
         )
 
@@ -181,10 +213,16 @@ class DataLoaderBuilder:
                 norm_tau=self.loader_config.norm_tau,
             )
 
+        batch_size = (
+            self.loader_config.batch_size
+            if split == "train"
+            else self.loader_config.batch_size_eval
+        )
         return DeepFilterNetDataLoader(
             dataset=dataset,
-            batch_size=self.loader_config.batch_size,
+            batch_size=batch_size,
             num_workers=self.loader_config.num_workers,
+            num_prefetch_batches=self.loader_config.num_prefetch_batches,
             seed=self.loader_config.seed,
         )
 
@@ -192,7 +230,7 @@ class DataLoaderBuilder:
 if __name__ == "__main__":
     from src.configs.config import load_config
 
-    _, augmentation_config, data_loader_config, _ = load_config(
+    _, augmentation_config, data_loader_config, _, _ = load_config(
         "./src/configs/test.yaml"
     )
     builder = DataLoaderBuilder(data_loader_config)

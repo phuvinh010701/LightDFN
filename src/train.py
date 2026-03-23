@@ -1,6 +1,7 @@
 """Training script for LightDeepFilterNet."""
 
 import argparse
+import math
 from pathlib import Path
 
 import torch
@@ -12,9 +13,9 @@ from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
 from tqdm import tqdm
 
-from src.configs.config import ModelConfig, TrainConfig, load_config
+from src.configs.config import LossConfig, ModelConfig, TrainConfig, load_config
 from src.dataloader.loader import DataLoaderBuilder, DeepFilterNetDataLoader, DsBatch
-from src.losses.loss import Loss, LossConfig
+from src.losses.loss import Loss
 from src.model.lightdeepfilternet import init_model
 from src.utils.erb import get_erb_filterbanks
 from src.utils.io import get_device
@@ -184,11 +185,14 @@ def run_epoch(
     return avg_loss, avg_summaries
 
 
-def build_loss(model_cfg: ModelConfig, device: torch.device) -> Loss:
+def build_loss(
+    model_cfg: ModelConfig, loss_cfg: LossConfig, device: torch.device
+) -> Loss:
     """Build the composite loss function from a model config.
 
     Args:
         model_cfg (ModelConfig): Model configuration used to align loss parameters.
+        loss_cfg (LossConfig): Loss weights and hyperparameters.
         device (torch.device): Device to place loss tensors on.
 
     Returns:
@@ -198,13 +202,22 @@ def build_loss(model_cfg: ModelConfig, device: torch.device) -> Loss:
         model_cfg.sr, model_cfg.fft_size, model_cfg.nb_erb, model_cfg.min_nb_freqs
     )
     return Loss(
-        LossConfig(),
+        loss_cfg,
         erb_fb=erb_fb.to(device),
         fft_size=model_cfg.fft_size,
         hop_size=model_cfg.hop_size,
         sr=model_cfg.sr,
         lsnr_min=model_cfg.lsnr_min,
         lsnr_max=model_cfg.lsnr_max,
+    )
+
+
+def cosine_weight_decay(
+    epoch: int, total_epochs: int, wd_start: float, wd_end: float
+) -> float:
+    """Cosine annealing of weight decay from wd_start to wd_end over total_epochs."""
+    return wd_end + 0.5 * (wd_start - wd_end) * (
+        1.0 + math.cos(math.pi * epoch / total_epochs)
     )
 
 
@@ -215,7 +228,7 @@ def build_scheduler(
     if train_cfg.warmup_epochs > 0:
         warmup = LinearLR(
             optimizer,
-            start_factor=train_cfg.lr_min / train_cfg.lr,
+            start_factor=train_cfg.lr_warmup / train_cfg.lr,
             end_factor=1.0,
             total_iters=train_cfg.warmup_epochs,
         )
@@ -239,6 +252,7 @@ def save_checkpoint(
     optimizer: AdamW,
     scheduler: object,
     best_val_loss: float,
+    epochs_without_improvement: int = 0,
 ) -> None:
     """Persist model, optimiser, and scheduler state to disk.
 
@@ -249,6 +263,7 @@ def save_checkpoint(
         optimizer (AdamW): Optimiser whose state to save.
         scheduler (object): LR scheduler whose state to save.
         best_val_loss (float): Best validation loss seen so far.
+        epochs_without_improvement (int): Early-stopping counter.
     """
     torch.save(
         {
@@ -257,6 +272,7 @@ def save_checkpoint(
             "optimizer": optimizer.state_dict(),
             "scheduler": scheduler.state_dict(),
             "best_val_loss": best_val_loss,
+            "epochs_without_improvement": epochs_without_improvement,
         },
         path,
     )
@@ -270,7 +286,7 @@ def main() -> None:
     parser.add_argument("--resume", default=None, help="Checkpoint path to resume from")
     args = parser.parse_args()
 
-    model_cfg, aug_cfg, loader_cfg, train_cfg = load_config(args.config)
+    model_cfg, aug_cfg, loader_cfg, train_cfg, loss_cfg = load_config(args.config)
     device = get_device()
 
     # Align model batch size with dataloader (used by Li-GRU hidden state init)
@@ -300,15 +316,14 @@ def main() -> None:
     train_loader = builder.build("train", aug_cfg)
     val_loader = builder.build("valid", aug_cfg)
 
-    loss_fn = build_loss(model_cfg, device)
+    loss_fn = build_loss(model_cfg, loss_cfg, device)
 
-    # amsgrad=True matches DeepFilterNet's AdamW default
     optimizer = AdamW(
         model.parameters(),
         lr=train_cfg.lr,
         weight_decay=train_cfg.weight_decay,
-        betas=(0.9, 0.999),
-        amsgrad=True,
+        betas=tuple(train_cfg.adam_betas),  # type: ignore[arg-type]
+        amsgrad=train_cfg.amsgrad,
     )
     scheduler = build_scheduler(optimizer, train_cfg)
 
@@ -320,6 +335,7 @@ def main() -> None:
 
     start_epoch = 0
     best_val_loss = float("inf")
+    epochs_without_improvement = 0
 
     if args.resume:
         ckpt = torch.load(args.resume, map_location=device)
@@ -328,6 +344,7 @@ def main() -> None:
         scheduler.load_state_dict(ckpt["scheduler"])
         start_epoch = ckpt["epoch"] + 1
         best_val_loss = ckpt.get("best_val_loss", float("inf"))
+        epochs_without_improvement = ckpt.get("epochs_without_improvement", 0)
         logger.info(f"Resumed from {args.resume}, starting at epoch {start_epoch}")
 
     for epoch in range(start_epoch, train_cfg.epochs):
@@ -352,7 +369,18 @@ def main() -> None:
         scheduler.step()
         current_lr = optimizer.param_groups[0]["lr"]
 
-        log: dict = {"epoch": epoch, "train/loss": train_loss, "lr": current_lr}
+        current_wd = cosine_weight_decay(
+            epoch, train_cfg.epochs, train_cfg.weight_decay, train_cfg.weight_decay_end
+        )
+        for pg in optimizer.param_groups:
+            pg["weight_decay"] = current_wd
+
+        log: dict = {
+            "epoch": epoch,
+            "train/loss": train_loss,
+            "lr": current_lr,
+            "weight_decay": current_wd,
+        }
 
         if (epoch + 1) % train_cfg.val_every_n_epochs == 0:
             val_loader.start_epoch(epoch)
@@ -375,6 +403,7 @@ def main() -> None:
             is_best = val_loss < best_val_loss
             if is_best:
                 best_val_loss = val_loss
+                epochs_without_improvement = 0
                 save_checkpoint(
                     ckpt_dir / "best.pt",
                     epoch,
@@ -382,15 +411,24 @@ def main() -> None:
                     optimizer,
                     scheduler,
                     best_val_loss,
+                    epochs_without_improvement,
                 )
                 wandb.save(str(ckpt_dir / "best.pt"))
                 logger.info(f"  → new best val loss: {best_val_loss:.4f}")
+            else:
+                epochs_without_improvement += 1
         else:
             val_loss = float("nan")
             is_best = False
 
         save_checkpoint(
-            ckpt_dir / "last.pt", epoch, model, optimizer, scheduler, best_val_loss
+            ckpt_dir / "last.pt",
+            epoch,
+            model,
+            optimizer,
+            scheduler,
+            best_val_loss,
+            epochs_without_improvement,
         )
         wandb.log(log)
 
@@ -399,6 +437,15 @@ def main() -> None:
             f"train={train_loss:.4f}  val={val_loss:.4f}  lr={current_lr:.2e}"
             + ("  [best]" if is_best else "")
         )
+
+        if (
+            train_cfg.early_stopping_patience > 0
+            and epochs_without_improvement >= train_cfg.early_stopping_patience
+        ):
+            logger.info(
+                f"Early stopping: no improvement for {epochs_without_improvement} epochs."
+            )
+            break
 
     wandb.finish()
     logger.info("Training complete.")

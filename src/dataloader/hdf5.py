@@ -1,3 +1,5 @@
+import math
+
 import h5py
 import numpy as np
 from loguru import logger
@@ -78,8 +80,9 @@ class Hdf5Dataset:
     ) -> np.ndarray:
         """Load a sample, tiling it until it has at least ``min_samples`` frames."""
         audio = self.__getitem__(idx, rng=rng)
-        while audio.shape[1] < min_samples:
-            audio = np.concatenate([audio, audio], axis=1)
+        if audio.shape[1] < min_samples:
+            reps = math.ceil(min_samples / audio.shape[1])
+            audio = np.tile(audio, (1, reps))
         return audio
 
     def close(self) -> None:

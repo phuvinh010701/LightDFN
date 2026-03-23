@@ -5,12 +5,12 @@ Ported and adapted from DeepFilterNet:
 """
 
 from collections import defaultdict
-from dataclasses import dataclass, field
 
 import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
 
+from src.configs.config import LossConfig
 from src.model.modules import as_complex, as_real
 
 
@@ -383,39 +383,6 @@ class LocalSnrLoss(nn.Module):
     def forward(self, input: Tensor, target_lsnr: Tensor) -> Tensor:
         # input: [B, T, 1],  target_lsnr: [B, T]
         return F.mse_loss(input.squeeze(-1), target_lsnr) * self.factor
-
-
-@dataclass
-class LossConfig:
-    """Configuration for the combined training loss."""
-
-    # MaskLoss
-    ml_factor: float = 1.0
-    ml_mask: str = "iam"  # "iam" | "irm" | "wg"
-    ml_gamma: float = 0.6
-    ml_gamma_pred: float = 0.6
-    ml_f_under: float = 2.0
-    ml_powers: list[int] = field(default_factory=lambda: [2, 4])
-    ml_factors: list[float] = field(default_factory=lambda: [1.0, 10.0])
-
-    # SpectralLoss
-    sl_factor_magnitude: float = 0.0
-    sl_factor_complex: float = 0.0
-    sl_factor_under: float = 1.0
-    sl_gamma: float = 1.0
-
-    # MultiResSpecLoss
-    mrsl_factor: float = 0.0
-    mrsl_factor_complex: float = 0.0
-    mrsl_gamma: float = 1.0
-    mrsl_fft_sizes: list[int] = field(default_factory=lambda: [512, 1024, 2048])
-
-    # SdrLoss
-    sdr_factor: float = 0.0
-    sdr_segmental_ws: list[int] = field(default_factory=list)
-
-    # LocalSnrLoss
-    lsnr_factor: float = 5e-4
 
 
 class Loss(nn.Module):

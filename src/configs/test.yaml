@@ -73,7 +73,7 @@ augmentation:
   # Speech distortions — time domain
   p_zeroing: 0.
   p_air_absorption: 0.
-  p_bandwidth_limit: 0.
+  p_bandwidth_ext: 0.
 
 data_loader:
   speech_hdf5: ['datasets/hdf5/speech_clean_minisize.hdf5']

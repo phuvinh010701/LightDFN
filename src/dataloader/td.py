@@ -2,6 +2,7 @@
 
 import bisect
 import logging
+import math
 from dataclasses import dataclass
 
 import h5py
@@ -93,12 +94,9 @@ def _fft_convolve(signal: Tensor, kernel: Tensor) -> Tensor:
     n = 1
     while n < out_len + kernel.shape[0] - 1:
         n <<= 1
-    K = torch.fft.rfft(kernel, n=n)
-    channels = [
-        torch.fft.irfft(torch.fft.rfft(signal[c], n=n) * K, n=n)[:out_len]
-        for c in range(signal.shape[0])
-    ]
-    return torch.stack(channels)
+    K = torch.fft.rfft(kernel, n=n)  # [n//2+1]
+    S = torch.fft.rfft(signal, n=n)  # [C, n//2+1]
+    return torch.fft.irfft(S * K, n=n)[:, :out_len]  # [C, out_len]
 
 
 def _combine_noises(
@@ -112,8 +110,9 @@ def _combine_noises(
     for noise in noises:
         if noise.shape[1] == 0:
             noise = torch.zeros(noise.shape[0], target_length)
-        while noise.shape[1] < target_length:
-            noise = torch.cat([noise, noise], dim=1)
+        if noise.shape[1] < target_length:
+            reps = math.ceil(target_length / noise.shape[1])
+            noise = noise.repeat(1, reps)
         if noise.shape[1] > target_length:
             excess = noise.shape[1] - target_length
             start = int(rng.integers(0, excess + 1))
@@ -250,6 +249,7 @@ class TdDataset(Dataset):
         self.n_noises = n_noises
         self.seed = seed
         self.is_train = split == "train"
+        self.p_reverb = aug_config.p_reverb
 
         self._speech = self._open(speech_files, max_len_s=max_len_s)
         self._noise = self._open(noise_files)
@@ -289,12 +289,18 @@ class TdDataset(Dataset):
         speech = self._load_speech(idx, rng)
         noise = self._load_and_combine_noise(speech.shape, rng)
 
-        speech, noise = self._apply_rir(speech, noise, rng)
+        if self._rir_cum and rng.random() < self.p_reverb:
+            speech, noise, speech_rev = self._apply_rir(speech, noise, rng)
+        else:
+            speech_rev = None
 
+        # Use fully reverberant speech as the noisy mixture base (matches Rust dataset.rs).
+        # When no RIR was applied, speech_rev is None and we fall back to clean speech.
+        speech_distorted_base = speech_rev if speech_rev is not None else speech
         speech_input = (
-            _apply_aug(self._distortions, speech, self.sr)
+            _apply_aug(self._distortions, speech_distorted_base, self.sr)
             if self._distortions
-            else speech
+            else speech_distorted_base
         )
 
         speech_out, noise_out, noisy = _mix_audio_signal(
@@ -361,9 +367,16 @@ class TdDataset(Dataset):
         speech: Tensor,
         noise: Tensor,
         rng: np.random.Generator,
-    ) -> tuple[Tensor, Tensor]:
+    ) -> tuple[Tensor, Tensor, Tensor | None]:
+        """Apply room impulse response reverberation.
+
+        Returns ``(speech_target, noise_rev, speech_rev)`` where ``speech_rev``
+        is the fully reverberant speech used as the noisy mixture input, and
+        ``speech_target`` is the partially dereverberant clean training target.
+        Returns ``None`` for ``speech_rev`` when no RIR data is available.
+        """
         if not self._rir_cum:
-            return speech, noise
+            return speech, noise, None
 
         flat_idx = int(rng.integers(0, self._rir_cum[-1]))
         ds, key_idx = _lookup(self._rir, self._rir_cum, flat_idx)
@@ -376,14 +389,30 @@ class TdDataset(Dataset):
         rir_target = rir.clone()
         if cutoff < len(rir_target):
             tail = torch.arange(len(rir_target) - cutoff, dtype=torch.float32)
-            rir_target[cutoff:] *= torch.exp(-tail / (0.1 * self.sr))
+            # Match Rust supress_late: decay[i] = 10^(-(i/sr) / tau),
+            # where tau = -rt60 / log10(10^(-60/20)) = rt60 / 3  (rt60=0.5 → tau≈0.167s)
+            _rt60_tau = 0.5 / 3.0
+            rir_target[cutoff:] *= torch.pow(
+                torch.tensor(10.0, dtype=tail.dtype), -(tail / self.sr) / _rt60_tau
+            )
+        # Re-normalise after decay so rir_target has unit energy
+        rir_target_e = float(rir_target.pow(2).sum().sqrt().item())
+        rir_target = rir_target / (rir_target_e + 1e-10)
 
+        speech_rms = float(speech.pow(2).mean().sqrt().item())
+
+        # speech_rev: fully reverberant — used as the noisy mixture input (matches Rust)
+        speech_rev = _fft_convolve(speech, rir)
         noise_rev = _fft_convolve(noise, rir)
         speech_little_rev = _fft_convolve(speech, rir_target)
-        drr_f = float(rng.uniform(0.0, 1.0))
+        drr_f = 0.3  # Fixed DRR matching Rust default (DF_REVERB_DRR=0.3)
         speech_target = drr_f * speech + (1.0 - drr_f) * speech_little_rev
 
-        return speech_target, noise_rev
+        # Restore speech to original RMS level
+        speech_rms_after = float(speech_target.pow(2).mean().sqrt().item())
+        speech_target = speech_target * (speech_rms / (speech_rms_after + 1e-10))
+
+        return speech_target, noise_rev, speech_rev
 
     @staticmethod
     def _open(

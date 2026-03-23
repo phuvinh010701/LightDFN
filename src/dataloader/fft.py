@@ -28,6 +28,7 @@ def _norm_alpha(sr: int, hop_size: int, norm_tau: float) -> float:
     return math.exp(-1.0 / (frames_per_sec * norm_tau))
 
 
+@torch.jit.script
 def _running_mean_norm_erb(power_db: Tensor, alpha: float) -> Tensor:
     """Exponential running-mean normalisation over the time axis for ERB features.
 
@@ -45,19 +46,21 @@ def _running_mean_norm_erb(power_db: Tensor, alpha: float) -> Tensor:
         Normalised features of shape ``[C, T, E]``, roughly zero-centred.
     """
     C, T, E = power_db.shape
-    # Initialise state: linearly from -60 dB (low ERB) to -90 dB (high ERB)
     state = torch.linspace(
         -60.0, -90.0, E, device=power_db.device, dtype=power_db.dtype
     )
     state = state.unsqueeze(0).expand(C, -1).clone()  # [C, E]
 
     out = torch.empty_like(power_db)
+    one_minus_alpha = 1.0 - alpha
     for t in range(T):
-        state = power_db[:, t, :] * (1.0 - alpha) + state * alpha
-        out[:, t, :] = (power_db[:, t, :] - state) / 40.0
+        frame = power_db[:, t, :]
+        state = frame * one_minus_alpha + state * alpha
+        out[:, t, :] = (frame - state) / 40.0
     return out
 
 
+@torch.jit.script
 def _running_unit_norm(spec: Tensor, alpha: float) -> Tensor:
     """Exponential running unit-normalisation over the time axis for complex features.
 
@@ -75,14 +78,14 @@ def _running_unit_norm(spec: Tensor, alpha: float) -> Tensor:
         Unit-normalised complex spectrogram of shape ``[C, F, T]``.
     """
     C, F, T = spec.shape
-    # Initialise state: linearly from 0.001 (DC) to 0.0001 (highest DF bin)
     state = torch.linspace(0.001, 0.0001, F, device=spec.device, dtype=spec.real.dtype)
     state = state.unsqueeze(0).expand(C, -1).clone()  # [C, F]
 
     out = torch.empty_like(spec)
+    one_minus_alpha = 1.0 - alpha
     for t in range(T):
         frame = spec[:, :, t]
-        state = frame.abs() * (1.0 - alpha) + state * alpha
+        state = frame.abs() * one_minus_alpha + state * alpha
         out[:, :, t] = frame / state.sqrt()
     return out
 

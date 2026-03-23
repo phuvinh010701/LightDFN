@@ -1,27 +1,16 @@
 model:
-  # Audio parameters
-  sr: 48000           # Sample rate
-  fft_size: 960       # FFT size in samples
-  hop_size: 480       # STFT hop size in samples
-  nb_erb: 32          # Number of ERB bands
-  nb_df: 96           # Number of DF bins (applied from 0 to nb_df-1)
-
-  # Normalization
-  norm_tau: 1.0       # Normalization decay factor
-
-  # LSNR (Local SNR) parameters
-  lsnr_max: 35        # LSNR maximum value (ground truth truncation)
-  lsnr_min: -15       # LSNR minimum value (ground truth truncation)
-
-  # ERB parameters
-  min_nb_freqs: 2     # Minimum frequency bins per ERB band
-
-  # DF parameters
-  df_order: 5         # Deep filtering order
-  df_lookahead: 2     # Deep filtering look-ahead
-  pad_mode: "output"  # Padding mode: 'input' or 'output'
-
-  # Convolution parameters
+  sr: 48000
+  fft_size: 960
+  hop_size: 480
+  nb_erb: 32
+  nb_df: 96
+  norm_tau: 1.0
+  lsnr_max: 35
+  lsnr_min: -15
+  min_nb_freqs: 2
+  df_order: 5
+  df_lookahead: 2
+  pad_mode: "output"
   conv_lookahead: 2
   conv_ch: 64
   conv_depthwise: true
@@ -29,77 +18,93 @@ model:
   conv_kernel: [1, 3]
   convt_kernel: [1, 3]
   conv_kernel_inp: [3, 3]
-
-  # Embedding/Encoder GRU parameters
   emb_hidden_dim: 256
   emb_num_layers: 3
   emb_gru_skip: "none"
   emb_gru_skip_enc: "none"
-
-  # Deep Filtering decoder GRU parameters
   df_hidden_dim: 256
   df_num_layers: 2
   df_gru_skip: "groupedlinear"
   df_pathway_kernel_size_t: 5
-
-  # Linear layer parameters
   lin_groups: 16
   enc_lin_groups: 32
-
-  # Other architecture parameters
   enc_concat: false
   df_n_iter: 1
-
-  # Post-processing
   mask_pf: false
   pf_beta: 0.02
   lsnr_dropout: false
-
-  # Li-GRU specific
   batch_size: 1
 
 augmentation:
-  # Speech augmentations
   p_remove_dc: 0.25
   p_lfilt: 0.30
   p_biquad: 0.30
   p_resample: 0.20
-  p_clipping: 0.10
-
-  # Noise augmentations
   p_noise_clipping: 0.15
   p_noise_biquad: 0.40
-
-  # Speech distortions — time domain
-  p_zeroing: 0.10
-  p_air_absorption: 0.05
-  p_bandwidth_limit: 0.20
+  p_reverb: 0.1
+  p_bandwidth_ext: 0.0
+  p_clipping: 0.0
+  p_air_absorption: 0.0
+  p_zeroing: 0.0
+  p_interfer_sp: 0.0
 
 data_loader:
   speech_hdf5: ["datasets/hdf5/speech_clean.hdf5"]
   noise_hdf5: ["datasets/hdf5/noise_music.hdf5"]
   rir_hdf5: ["datasets/hdf5/rir.hdf5"]
   sr: 48000
-  max_len_s: 5.0
-  batch_size: 4
-  num_workers: 4
-  seed: 42
   fft_size: 960
   hop_size: 480
   nb_erb: 32
   nb_spec: 96
-  min_nb_freqs: 2   # must match model.min_nb_freqs
-  norm_tau: 1.0     # running-mean decay time-constant in seconds
+  min_nb_freqs: 2
+  norm_tau: 1.0
+  max_len_s: 3.0
+  batch_size: 64
+  batch_size_eval: 64
+  num_workers: 16
+  num_prefetch_batches: 8
+  seed: 43
+  dataloader_snrs: [-100, -5, 0, 5, 10, 20, 40]
+  global_ds_sampling_f: 1.0
 
 train:
-  epochs: 100
-  lr: 5.0e-4
-  lr_min: 1.0e-5
-  warmup_epochs: 3
-  weight_decay: 0.05
-  grad_clip: 1.0
-  checkpoint_dir: "checkpoints"
-  wandb_project: "lightdfn"
+  epochs: 120
   log_every_n_steps: 100
   val_every_n_epochs: 1
+  early_stopping_patience: 25
   max_nans: 50
+  p_atten_lim: 0.0
+  checkpoint_dir: "checkpoints"
+  wandb_project: "lightdfn"
+  optimizer: "adamw"
+  lr: 1.0e-3
+  lr_warmup: 1.0e-4
+  lr_min: 1.0e-6
+  warmup_epochs: 3
+  weight_decay: 1.0e-12
+  weight_decay_end: 0.01
+  adam_betas: [0.9, 0.999]
+  amsgrad: true
+  grad_clip: 1.0
+
+loss:
+  lsnr_factor: 1.0e-3
+  ml_factor: 0.0
+  ml_mask: "iam"
+  ml_gamma: 0.3
+  ml_gamma_pred: 0.3
+  ml_f_under: 1.0
+  ml_powers: [2, 4]
+  ml_factors: [1.0, 10.0]
+  sl_factor_magnitude: 0.0
+  sl_factor_complex: 0.0
+  sl_factor_under: 1.0
+  sl_gamma: 0.3
+  mrsl_factor: 500.0
+  mrsl_factor_complex: 500.0
+  mrsl_gamma: 0.3
+  mrsl_fft_sizes: [256, 512, 1024, 2048]
+  sdr_factor: 0.0
+  sdr_segmental_ws: []

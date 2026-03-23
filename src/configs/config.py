@@ -131,6 +131,8 @@ class TrainConfig:
     adam_betas: list[float] = field(default_factory=lambda: [0.9, 0.999])
     amsgrad: bool = True
     grad_clip: float = 1.0
+    audio_eval_every_n_epochs: int = 5
+    audio_eval_num_samples: int = 3
 
 
 @dataclass

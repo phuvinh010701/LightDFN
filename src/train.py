@@ -4,6 +4,9 @@ import argparse
 import math
 from pathlib import Path
 
+import matplotlib
+import matplotlib.pyplot as plt
+import numpy as np
 import torch
 import torch.nn as nn
 import wandb
@@ -20,6 +23,8 @@ from src.model.lightdeepfilternet import init_model
 from src.utils.erb import get_erb_filterbanks
 from src.utils.io import get_device
 from src.utils.utils import count_parameters
+
+matplotlib.use("Agg")  # Non-interactive backend for server-side rendering
 
 
 def compute_stft(audio: Tensor, fft_size: int, hop_size: int, window: Tensor) -> Tensor:
@@ -183,6 +188,191 @@ def run_epoch(
     avg_loss = total_loss / max(n_batches, 1)
     avg_summaries = {k: sum(v) / len(v) for k, v in all_summaries.items() if v}
     return avg_loss, avg_summaries
+
+
+def _spec_to_audio(
+    spec: Tensor, fft_size: int, hop_size: int, window: Tensor
+) -> Tensor:
+    """Reconstruct waveform from a complex spectrogram tensor.
+
+    Args:
+        spec: Shape ``[B, 1, T_frames, F, 2]`` real-valued (real/imag).
+        fft_size: FFT size.
+        hop_size: Hop size.
+        window: Analysis/synthesis window of length ``fft_size``.
+
+    Returns:
+        Waveform of shape ``[B, T_samples]``.
+    """
+    # [B, 1, T, F, 2] → complex [B, 1, T, F] → [B, F, T]
+    spec_c = torch.view_as_complex(spec[:, 0].contiguous())  # [B, T, F]
+    spec_c = spec_c.permute(0, 2, 1)  # [B, F, T]
+    B = spec_c.shape[0]
+    audio = torch.istft(
+        spec_c.reshape(B, spec_c.shape[-2], spec_c.shape[-1]),
+        n_fft=fft_size,
+        hop_length=hop_size,
+        win_length=fft_size,
+        window=window,
+        center=False,
+    )  # [B, T_samples]
+    return audio
+
+
+def _spectrogram_to_db(spec: Tensor, ref_db: float = 80.0) -> np.ndarray:
+    """Convert a complex spectrogram tensor to a dB magnitude array.
+
+    Args:
+        spec: Shape ``[1, T_frames, F, 2]`` or ``[T_frames, F, 2]``.
+        ref_db: Dynamic range in dB to clip at.
+
+    Returns:
+        Array of shape ``[F, T_frames]`` with values in ``[-ref_db, 0]`` dB.
+    """
+    if spec.dim() == 4:
+        spec = spec[0]  # [T, F, 2]
+    mag = torch.view_as_complex(spec.contiguous()).abs()  # [T, F]
+    mag_db = 20.0 * torch.log10(mag + 1e-8)
+    mag_db = mag_db - mag_db.max()
+    mag_db = mag_db.clamp(min=-ref_db)
+    return mag_db.T.cpu().numpy()  # [F, T]
+
+
+def _make_spectrogram_figure(
+    noisy: Tensor,
+    clean: Tensor,
+    enhanced: Tensor,
+    sr: int,
+    hop_size: int,
+    snr: float,
+) -> plt.Figure:
+    """Create a side-by-side spectrogram figure for one sample.
+
+    Args:
+        noisy:    ``[1, T_frames, F, 2]`` noisy spectrogram.
+        clean:    ``[1, T_frames, F, 2]`` clean spectrogram.
+        enhanced: ``[1, T_frames, F, 2]`` model output spectrogram.
+        sr:       Sample rate in Hz.
+        hop_size: Hop size in samples (used to set time axis).
+        snr:      Input SNR of the sample in dB.
+
+    Returns:
+        Matplotlib Figure with three spectrogram subplots.
+    """
+    titles = ["Noisy", "Clean (target)", "Enhanced"]
+    specs = [noisy, clean, enhanced]
+
+    fig, axes = plt.subplots(1, 3, figsize=(15, 4), constrained_layout=True)
+    fig.suptitle(f"Input SNR: {snr:.1f} dB", fontsize=12)
+
+    T_frames = noisy.shape[1]
+    duration_s = T_frames * hop_size / sr
+    freq_max = sr / 2 / 1000  # kHz
+
+    for ax, title, spec in zip(axes, titles, specs):
+        db = _spectrogram_to_db(spec)  # [F, T]
+        ax.imshow(
+            db,
+            origin="lower",
+            aspect="auto",
+            extent=[0, duration_s, 0, freq_max],
+            cmap="magma",
+            vmin=-80,
+            vmax=0,
+        )
+        ax.set_title(title)
+        ax.set_xlabel("Time (s)")
+        ax.set_ylabel("Frequency (kHz)")
+
+    return fig
+
+
+def eval_audio_samples(
+    model: nn.Module,
+    loader: DeepFilterNetDataLoader,
+    device: torch.device,
+    window: Tensor,
+    fft_size: int,
+    hop_size: int,
+    sr: int,
+    num_samples: int,
+    epoch: int,
+) -> None:
+    """Run inference on a few validation samples and log spectrograms + audio to WandB.
+
+    Args:
+        model:       Model in eval mode.
+        loader:      Validation dataloader.
+        device:      Compute device.
+        window:      STFT window.
+        fft_size:    FFT size.
+        hop_size:    Hop size.
+        sr:          Sample rate in Hz.
+        num_samples: Number of examples to log.
+        epoch:       Current epoch index (used for WandB step key).
+    """
+    model.eval()
+    logged = 0
+    log_dict: dict = {"epoch": epoch}
+
+    with torch.no_grad():
+        for batch in loader:
+            if logged >= num_samples:
+                break
+
+            spec_noisy, spec_clean, feat_erb, feat_spec = prepare_batch(
+                batch, fft_size, hop_size, window, device
+            )
+            enhanced, _mask, _lsnr, _ = model(spec_noisy.clone(), feat_erb, feat_spec)
+
+            batch_snrs = batch.snr.tolist()
+            n = min(num_samples - logged, spec_noisy.shape[0])
+
+            for i in range(n):
+                snr_val = float(batch_snrs[i])
+                tag = f"audio_eval/sample_{logged}"
+
+                # --- Spectrograms ---
+                fig = _make_spectrogram_figure(
+                    spec_noisy[i, :1],
+                    spec_clean[i, :1],
+                    enhanced[i, :1],
+                    sr=sr,
+                    hop_size=hop_size,
+                    snr=snr_val,
+                )
+                log_dict[f"{tag}/spectrogram"] = wandb.Image(fig)
+                plt.close(fig)
+
+                # --- Audio clips ---
+                noisy_wav = _spec_to_audio(
+                    spec_noisy[i : i + 1, :1], fft_size, hop_size, window
+                ).squeeze()
+                clean_wav = _spec_to_audio(
+                    spec_clean[i : i + 1, :1], fft_size, hop_size, window
+                ).squeeze()
+                enh_wav = _spec_to_audio(
+                    enhanced[i : i + 1, :1], fft_size, hop_size, window
+                ).squeeze()
+
+                for name, wav in [
+                    ("noisy", noisy_wav),
+                    ("clean", clean_wav),
+                    ("enhanced", enh_wav),
+                ]:
+                    wav_np = wav.cpu().float().numpy()
+                    # Normalize to [-1, 1] to avoid clipping artefacts in player
+                    peak = np.abs(wav_np).max()
+                    if peak > 0:
+                        wav_np = wav_np / peak
+                    log_dict[f"{tag}/{name}_audio"] = wandb.Audio(
+                        wav_np, sample_rate=sr, caption=f"{name} (SNR={snr_val:.1f}dB)"
+                    )
+
+                logged += 1
+
+    wandb.log(log_dict)
+    logger.info(f"Logged {logged} audio eval sample(s) at epoch {epoch}.")
 
 
 def build_loss(
@@ -399,6 +589,23 @@ def main() -> None:
             )
             log["val/loss"] = val_loss
             log.update({f"val/{k}": v for k, v in val_sums.items()})
+
+            if (
+                train_cfg.audio_eval_every_n_epochs > 0
+                and (epoch + 1) % train_cfg.audio_eval_every_n_epochs == 0
+            ):
+                val_loader.start_epoch(epoch)
+                eval_audio_samples(
+                    model,
+                    val_loader,
+                    device,
+                    window,
+                    model_cfg.fft_size,
+                    model_cfg.hop_size,
+                    model_cfg.sr,
+                    train_cfg.audio_eval_num_samples,
+                    epoch,
+                )
 
             is_best = val_loss < best_val_loss
             if is_best:

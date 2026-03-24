@@ -9,13 +9,13 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 import torch.nn as nn
-import wandb
 from loguru import logger
 from torch import Tensor
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
 from tqdm import tqdm
 
+import wandb
 from src.configs.config import LossConfig, ModelConfig, TrainConfig, load_config
 from src.dataloader.loader import DataLoaderBuilder, DeepFilterNetDataLoader, DsBatch
 from src.losses.loss import Loss
@@ -104,8 +104,7 @@ def run_epoch(
         summaries: Per-component mean losses (only populated during validation).
     """
     model.train(is_train)
-    # Collect detailed per-component breakdown only on validation (mirrors DeepFilterNet)
-    loss_fn.store_losses = not is_train
+    loss_fn.store_losses = True
 
     total_loss = 0.0
     n_batches = 0
@@ -173,17 +172,35 @@ def run_epoch(
             total_loss += loss.item()
             n_batches += 1
 
-            # Collect per-component summaries (only stored when loss_fn.store_losses=True)
+            # Collect per-component summaries for this step
+            _abbrev = {
+                "MaskLoss": "ml",
+                "SpectralLoss": "sl",
+                "MultiResSpecLoss": "mrsl",
+                "SdrLoss": "sdr",
+                "LocalSnrLoss": "lsnr",
+            }
+            step_sums: dict[str, float] = {}
             for k, vals in loss_fn.summaries.items():
-                all_summaries.setdefault(k, []).extend(v.item() for v in vals)
+                if vals:
+                    step_sums[k] = sum(v.item() for v in vals)
+                    all_summaries.setdefault(k, []).extend(v.item() for v in vals)
             loss_fn.reset_summaries()
 
-            pbar.set_postfix(loss=f"{loss.item():.4f}", nans=n_nans)
+            postfix: dict[str, object] = {"loss": f"{loss.item():.4f}", "nans": n_nans}
+            for k, v in step_sums.items():
+                postfix[_abbrev.get(k, k)] = f"{v:.4f}"
+            pbar.set_postfix(postfix)
 
             # Step-level wandb logging (train only)
             if is_train and (step + 1) % log_every_n_steps == 0:
                 global_step = epoch * len(loader) + step
-                wandb.log({f"{prefix}/loss_step": loss.item(), "step": global_step})
+                step_log: dict[str, object] = {
+                    f"{prefix}/loss_step": loss.item(),
+                }
+                for k, v in step_sums.items():
+                    step_log[f"{prefix}/{k}_step"] = v
+                wandb.log(step_log, step=global_step)
 
     avg_loss = total_loss / max(n_batches, 1)
     avg_summaries = {k: sum(v) / len(v) for k, v in all_summaries.items() if v}
@@ -214,7 +231,7 @@ def _spec_to_audio(
         hop_length=hop_size,
         win_length=fft_size,
         window=window,
-        center=False,
+        center=True,
     )  # [B, T_samples]
     return audio
 
@@ -399,7 +416,7 @@ def build_loss(
         sr=model_cfg.sr,
         lsnr_min=model_cfg.lsnr_min,
         lsnr_max=model_cfg.lsnr_max,
-    )
+    ).to(device)
 
 
 def cosine_weight_decay(
@@ -540,7 +557,7 @@ def main() -> None:
     for epoch in range(start_epoch, train_cfg.epochs):
         train_loader.start_epoch(epoch)
 
-        train_loss, _ = run_epoch(
+        train_loss, train_sums = run_epoch(
             model,
             train_loader,
             loss_fn,
@@ -571,6 +588,7 @@ def main() -> None:
             "lr": current_lr,
             "weight_decay": current_wd,
         }
+        log.update({f"train/{k}": v for k, v in train_sums.items()})
 
         if (epoch + 1) % train_cfg.val_every_n_epochs == 0:
             val_loader.start_epoch(epoch)

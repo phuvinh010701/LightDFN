@@ -3,6 +3,7 @@ from typing import Optional
 
 import torch
 import torch.nn.functional as F
+import torchaudio.functional as AF
 from loguru import logger
 from torch import Tensor
 from torch_audiomentations import AddColoredNoise, Compose
@@ -117,77 +118,6 @@ def _notch_coefs(
     return [b0 / a0, b1 / a0, b2 / a0], [1.0, a1 / a0, a2 / a0]
 
 
-@torch.jit.script
-def _apply_biquad_batch(samples: Tensor, b: Tensor, a: Tensor) -> Tensor:
-    """Apply a biquad IIR filter (Direct Form II Transposed) to a batch of audio.
-
-    Args:
-        samples: Audio tensor of shape (batch_size, num_channels, num_samples).
-        b: Feedforward coefficients, shape (batch_size, 3).
-        a: Feedback coefficients [a0=1, a1, a2], shape (batch_size, 3).
-
-    Returns:
-        Filtered audio, same shape as ``samples``.
-    """
-    B, C, T = samples.shape
-    out = torch.zeros_like(samples)
-
-    mem0 = samples.new_zeros(B, C)
-    mem1 = samples.new_zeros(B, C)
-
-    b0 = b[:, 0].view(B, 1)
-    b1 = b[:, 1].view(B, 1)
-    b2 = b[:, 2].view(B, 1)
-    a1 = a[:, 1].view(B, 1)
-    a2 = a[:, 2].view(B, 1)
-
-    for t in range(T):
-        x_t = samples[:, :, t]
-        y_t = b0 * x_t + mem0
-        mem0 = mem1 + b1 * x_t - a1 * y_t
-        mem1 = b2 * x_t - a2 * y_t
-        out[:, :, t] = y_t
-
-    return out
-
-
-@torch.jit.script
-def biquad_norm(x: Tensor, b: Tensor, a: Tensor) -> Tensor:
-    """Apply a normalised 2nd-order AR/MA filter (RNNoise/PercepNet form).
-
-    The difference equation is:
-
-    y[t] = x[t] + b[0]*x[t-1] + b[1]*x[t-2] - a[0]*y[t-1] - a[1]*y[t-2]
-
-    Args:
-        x: Input signal of shape (T,).
-        b: Feedforward coefficients [b1, b2], shape (2,).  b0 is implicitly 1.
-        a: Feedback coefficients [a1, a2], shape (2,).  a0 is implicitly 1.
-
-    Returns:
-        Filtered signal of shape (T,).
-    """
-    T = x.shape[0]
-    y = torch.zeros_like(x)
-    y_prev1 = x.new_zeros(())
-    y_prev2 = x.new_zeros(())
-    x_prev1 = x.new_zeros(())
-    x_prev2 = x.new_zeros(())
-
-    for t in range(T):
-        x_curr = x[t]
-        y_curr = (
-            x_curr + b[0] * x_prev1 + b[1] * x_prev2 - a[0] * y_prev1 - a[1] * y_prev2
-        )
-        y[t] = y_curr
-        x_prev2 = x_prev1
-        x_prev1 = x_curr
-        y_prev2 = y_prev1
-        y_prev1 = y_curr
-
-    return y
-
-
 # Augmentation 1: RandRemoveDc
 
 
@@ -266,8 +196,10 @@ class RandLFilt(BaseWaveformTransform):
 
         out = samples.clone()
         for i in range(B):
-            for ch in range(C):
-                out[i, ch] = biquad_norm(out[i, ch], b[i], a[i])
+            # b0 is implicitly 1; a0 is implicitly 1 — matches biquad_norm equation
+            b_coeffs = samples.new_tensor([1.0, b[i, 0].item(), b[i, 1].item()])
+            a_coeffs = samples.new_tensor([1.0, a[i, 0].item(), a[i, 1].item()])
+            out[i] = AF.lfilter(out[i], a_coeffs, b_coeffs, clamp=False)
 
         return ObjectDict(
             samples=out,
@@ -379,9 +311,15 @@ class RandBiquadFilter(BaseWaveformTransform):
 
             for _ in range(n):
                 b_list, a_list = self._sample_coefs(sr)
-                b = out.new_tensor([b_list])  # (1, 3)
-                a = out.new_tensor([a_list])  # (1, 3)
-                out[i : i + 1] = _apply_biquad_batch(out[i : i + 1], b, a)
+                out[i] = AF.biquad(
+                    out[i],
+                    b_list[0],
+                    b_list[1],
+                    b_list[2],
+                    a_list[0],
+                    a_list[1],
+                    a_list[2],
+                )
 
             if self.equalize_rms and pre_rms is not None:
                 post_rms = out[i].pow(2).mean().sqrt().clamp(min=1e-8)

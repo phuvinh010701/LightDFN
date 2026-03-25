@@ -32,3 +32,4 @@ datasets/raw/
 datasets/lists/
 datasets/hdf5/
 datasets/downloads/
+wandb/*

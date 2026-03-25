@@ -256,4 +256,6 @@ if __name__ == "__main__":
         )
     logger.info("all batches OK")
 
+    del loader
+
     logger.info("All smoke tests passed.")

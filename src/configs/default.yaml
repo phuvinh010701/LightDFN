@@ -61,9 +61,9 @@ data_loader:
   min_nb_freqs: 2
   norm_tau: 1.0
   max_len_s: 3.0
-  batch_size: 64
-  batch_size_eval: 64
-  num_workers: 16
+  batch_size: 32
+  batch_size_eval: 32
+  num_workers: 4
   num_prefetch_batches: 8
   seed: 43
   dataloader_snrs: [-100, -5, 0, 5, 10, 20, 40]
@@ -91,7 +91,7 @@ train:
 
 loss:
   lsnr_factor: 1.0e-3
-  ml_factor: 0.0
+  ml_factor: 1.0
   ml_mask: "iam"
   ml_gamma: 0.3
   ml_gamma_pred: 0.3

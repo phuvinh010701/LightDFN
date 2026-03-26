@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT_DIR="${ROOT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
-DEFAULT_DATA_DIR="/Volumes/TrainingData/datasets"
+DEFAULT_DATA_DIR="./datasets"
 if [[ ! -d "${DEFAULT_DATA_DIR}" ]]; then
   DEFAULT_DATA_DIR="${ROOT_DIR}/data"
 fi
@@ -72,6 +72,7 @@ Dataset selection:
   --download-vctk / --no-download-vctk                       Override VCTK download toggle (default: enabled)
   --download-librispeech / --no-download-librispeech         Override LibriSpeech toggle (default: production=1, apple/prototype=0)
   --download-musan / --no-download-musan                     Override MUSAN toggle (default: enabled)
+  --download-dns4 / --no-download-dns4                       Override DNS4 toggle (default: enabled)
   --download-fsd50k / --no-download-fsd50k                   Override FSD50K toggle (default: enabled)
   --download-air / --no-download-air                         Override AIR toggle (default: enabled)
   --download-openair / --no-download-openair                 Override OpenAIR toggle (default: enabled)
@@ -81,6 +82,7 @@ Dataset path overrides:
   --vctk-dir PATH                 Existing VCTK root (default: EXTRACT_DIR/VCTK-Corpus-0.92)
   --librispeech-dir PATH          Existing LibriSpeech root (default: EXTRACT_DIR/LibriSpeech)
   --musan-dir PATH                Existing MUSAN root (default: EXTRACT_DIR/musan)
+  --dns4-dir PATH                 Existing DNS4 root (default: EXTRACT_DIR/dns4)
   --fsd50k-dir PATH               Existing FSD50K root (default: EXTRACT_DIR/FSD50K)
   --air-rir-dir PATH              Existing AIR RIR root (default: AUDB_DIR/data)
   --openair-dir PATH              Existing OpenAIR root (default: AUDB_DIR/wav)
@@ -135,6 +137,7 @@ CLI_OPENAIR_VERSION=""
 CLI_DOWNLOAD_VCTK=""
 CLI_DOWNLOAD_LIBRISPEECH=""
 CLI_DOWNLOAD_MUSAN=""
+CLI_DOWNLOAD_DNS4=""
 CLI_DOWNLOAD_FSD50K=""
 CLI_DOWNLOAD_AIR=""
 CLI_DOWNLOAD_OPENAIR=""
@@ -142,6 +145,7 @@ CLI_DOWNLOAD_ACOUSTICROOMS=""
 CLI_VCTK_DIR=""
 CLI_LIBRISPEECH_DIR=""
 CLI_MUSAN_DIR=""
+CLI_DNS4_DIR=""
 CLI_FSD50K_DIR=""
 CLI_AIR_RIR_DIR=""
 CLI_OPENAIR_DIR=""
@@ -320,6 +324,14 @@ while [[ $# -gt 0 ]]; do
       CLI_DOWNLOAD_MUSAN="0"
       shift
       ;;
+    --download-dns4)
+      CLI_DOWNLOAD_DNS4="1"
+      shift
+      ;;
+    --no-download-dns4)
+      CLI_DOWNLOAD_DNS4="0"
+      shift
+      ;;
     --download-fsd50k)
       CLI_DOWNLOAD_FSD50K="1"
       shift
@@ -364,6 +376,10 @@ while [[ $# -gt 0 ]]; do
       CLI_MUSAN_DIR="$2"
       shift 2
       ;;
+    --dns4-dir)
+      CLI_DNS4_DIR="$2"
+      shift 2
+      ;;
     --fsd50k-dir)
       CLI_FSD50K_DIR="$2"
       shift 2
@@ -405,6 +421,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 DATA_DIR="${CLI_DATA_DIR:-${DATA_DIR:-${DEFAULT_DATA_DIR}}}"
+DATA_DIR="${DATA_DIR%/}"
 LIST_DIR="${CLI_LIST_DIR:-${LIST_DIR:-${DATA_DIR}/lists}}"
 
 # Download controls (opt-in)
@@ -442,6 +459,7 @@ OPENAIR_VERSION="${CLI_OPENAIR_VERSION:-${OPENAIR_VERSION:-1.0.0}}"
 DOWNLOAD_VCTK="${CLI_DOWNLOAD_VCTK:-${DOWNLOAD_VCTK:-}}"
 DOWNLOAD_LIBRISPEECH="${CLI_DOWNLOAD_LIBRISPEECH:-${DOWNLOAD_LIBRISPEECH:-}}"
 DOWNLOAD_MUSAN="${CLI_DOWNLOAD_MUSAN:-${DOWNLOAD_MUSAN:-}}"
+DOWNLOAD_DNS4="${CLI_DOWNLOAD_DNS4:-${DOWNLOAD_DNS4:-}}"
 DOWNLOAD_FSD50K="${CLI_DOWNLOAD_FSD50K:-${DOWNLOAD_FSD50K:-}}"
 DOWNLOAD_AIR="${CLI_DOWNLOAD_AIR:-${DOWNLOAD_AIR:-}}"
 DOWNLOAD_OPENAIR="${CLI_DOWNLOAD_OPENAIR:-${DOWNLOAD_OPENAIR:-}}"
@@ -456,6 +474,7 @@ echo "[config] download_dir=${DOWNLOAD_DIR} extract_dir=${EXTRACT_DIR} list_dir=
 VCTK_DIR="${CLI_VCTK_DIR:-${VCTK_DIR:-${EXTRACT_DIR}/VCTK-Corpus-0.92}}"
 LIBRISPEECH_DIR="${CLI_LIBRISPEECH_DIR:-${LIBRISPEECH_DIR:-${EXTRACT_DIR}/LibriSpeech}}"
 MUSAN_DIR="${CLI_MUSAN_DIR:-${MUSAN_DIR:-${EXTRACT_DIR}/musan}}"
+DNS4_DIR="${CLI_DNS4_DIR:-${DNS4_DIR:-${EXTRACT_DIR}/dns4}}"
 FSD50K_DIR="${CLI_FSD50K_DIR:-${FSD50K_DIR:-${EXTRACT_DIR}/FSD50K}}"
 # AIR/OpenAIR via audb: AIR goes to data/, OpenAIR goes to wav/
 AIR_RIR_DIR="${CLI_AIR_RIR_DIR:-${AIR_RIR_DIR:-${AUDB_DIR}/data}}"
@@ -526,6 +545,9 @@ list_archive_roots() {
       ;;
     *.tar.gz|*.tgz)
       tar -tzf "${archive}" | awk -F'/' 'NF {print $1}' | sed '/^$/d' | sort -u
+      ;;
+    *.tar.bz2|*.tbz2)
+      tar -tjf "${archive}" | awk -F'/' 'NF {print $1}' | sed '/^$/d' | sort -u
       ;;
     *)
       return 1
@@ -877,6 +899,9 @@ extract_archive() {
     *.tar.gz|*.tgz)
       tar -xzf "${archive}" -C "${stage_dir}"
       ;;
+    *.tar.bz2|*.tbz2)
+      tar -xjf "${archive}" -C "${stage_dir}"
+      ;;
     *.zip)
       unzip -n -q "${archive}" -d "${stage_dir}"
       ;;
@@ -923,6 +948,15 @@ verify_archive() {
     *.tar.gz|*.tgz)
       command -v tar >/dev/null 2>&1 || return 0
       tar -tzf "${archive}" >/dev/null 2>&1
+      status=$?
+      if [[ ${status} -eq 0 && "${VERIFY_CACHE}" == "1" ]]; then
+        cache_store "${archive}"
+      fi
+      return ${status}
+      ;;
+    *.tar.bz2|*.tbz2)
+      command -v tar >/dev/null 2>&1 || return 0
+      tar -tjf "${archive}" >/dev/null 2>&1
       status=$?
       if [[ ${status} -eq 0 && "${VERIFY_CACHE}" == "1" ]]; then
         cache_store "${archive}"
@@ -1215,6 +1249,9 @@ if [[ "${DOWNLOAD}" == "1" ]]; then
   if [[ -z "${DOWNLOAD_MUSAN}" ]]; then
     DOWNLOAD_MUSAN=1
   fi
+  if [[ -z "${DOWNLOAD_DNS4}" ]]; then
+    DOWNLOAD_DNS4=1
+  fi
   if [[ -z "${DOWNLOAD_FSD50K}" ]]; then
     DOWNLOAD_FSD50K=1
   fi
@@ -1260,6 +1297,26 @@ if [[ "${DOWNLOAD}" == "1" ]]; then
   # MUSAN
   if should_download "${DOWNLOAD_MUSAN}"; then
     download_and_extract "https://www.openslr.org/resources/17/musan.tar.gz" "${EXTRACT_DIR}"
+  fi
+
+  # DNS4 Noise Fullband
+  if should_download "${DOWNLOAD_DNS4}"; then
+    mkdir -p "${DNS4_DIR}"
+    DNS4_BASE_URL="https://dns4public.blob.core.windows.net/dns4archive/datasets_fullband"
+    DNS4_BLOBS=(
+      "noise_fullband/datasets_fullband.noise_fullband.audioset_000.tar.bz2"
+      "noise_fullband/datasets_fullband.noise_fullband.audioset_001.tar.bz2"
+      "noise_fullband/datasets_fullband.noise_fullband.audioset_002.tar.bz2"
+      "noise_fullband/datasets_fullband.noise_fullband.audioset_003.tar.bz2"
+      "noise_fullband/datasets_fullband.noise_fullband.audioset_004.tar.bz2"
+      "noise_fullband/datasets_fullband.noise_fullband.audioset_005.tar.bz2"
+      "noise_fullband/datasets_fullband.noise_fullband.audioset_006.tar.bz2"
+      "noise_fullband/datasets_fullband.noise_fullband.freesound_000.tar.bz2"
+      "noise_fullband/datasets_fullband.noise_fullband.freesound_001.tar.bz2"
+    )
+    for blob in "${DNS4_BLOBS[@]}"; do
+      download_and_extract "${DNS4_BASE_URL}/${blob}" "${DNS4_DIR}"
+    done
   fi
 
   # FSD50K
@@ -1376,6 +1433,10 @@ if require_dir "MUSAN" "${MUSAN_DIR}"; then
   write_list "${MUSAN_DIR}/music" "${LIST_DIR}/musan_music.txt" "*.wav"
 fi
 
+if require_dir "DNS4" "${DNS4_DIR}"; then
+  write_list "${DNS4_DIR}" "${LIST_DIR}/dns4_noise.txt" "*.wav"
+fi
+
 # FSD50K filtered list (CC0/CC-BY only)
 # Expected inputs:
 # - ${FSD50K_DIR}/FSD50K.metadata/ with metadata CSVs
@@ -1420,13 +1481,16 @@ echo "[info] combining lists for profile=${PROFILE}..."
 } | write_atomic_file "${LIST_DIR}/clean_all.txt"
 echo "[ok] wrote $(wc -l < "${LIST_DIR}/clean_all.txt") entries -> ${LIST_DIR}/clean_all.txt"
 
-# Noise + music: MUSAN noise/music + FSD50K filtered
+# Noise + music: MUSAN noise/music + FSD50K filtered + DNS4
 {
   if [[ -f "${LIST_DIR}/musan_noise.txt" ]]; then
     cat "${LIST_DIR}/musan_noise.txt"
   fi
   if [[ -f "${LIST_DIR}/musan_music.txt" ]]; then
     cat "${LIST_DIR}/musan_music.txt"
+  fi
+  if [[ -f "${LIST_DIR}/dns4_noise.txt" ]]; then
+    cat "${LIST_DIR}/dns4_noise.txt"
   fi
   if [[ -f "${LIST_DIR}/fsd50k_filtered.txt" ]]; then
     cat "${LIST_DIR}/fsd50k_filtered.txt"
@@ -1455,7 +1519,7 @@ if [[ ! -s "${LIST_DIR}/clean_all.txt" ]]; then
   errors=1
 fi
 if [[ ! -s "${LIST_DIR}/noise_music.txt" ]]; then
-  echo "[error] noise_music.txt is empty - need MUSAN and/or FSD50K" >&2
+  echo "[error] noise_music.txt is empty - need MUSAN, DNS4, and/or FSD50K" >&2
   errors=1
 fi
 if [[ ! -s "${LIST_DIR}/rir_all.txt" ]]; then

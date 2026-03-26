@@ -33,7 +33,7 @@ uv sync
 
 ## Dataset Setup
 
-LightDFN uses six corpora spanning clean speech, noise, music, and room impulse responses (RIRs). The dataset tooling handles download, extraction, license-aware filtering, and manifest generation.
+LightDFN uses seven corpora spanning clean speech, noise, music, and room impulse responses (RIRs). The dataset tooling handles download, extraction, license-aware filtering, and manifest generation.
 
 ### Datasets
 
@@ -42,6 +42,7 @@ LightDFN uses six corpora spanning clean speech, noise, music, and room impulse 
 | VCTK | Clean speech | prototype + production |
 | LibriSpeech | Clean speech | production only |
 | MUSAN | Noise & music | prototype + production |
+| DNS4 Noise Fullband | Noise | prototype + production |
 | FSD50K | Noise (CC0/CC-BY filtered) | prototype + production |
 | AIR / OpenAIR | RIR | prototype + production |
 | AcousticRooms | RIR | production only |

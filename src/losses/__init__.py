@@ -1,14 +1,14 @@
 from src.losses.loss import (
+    LocalSnrLoss,
+    LocalSnrTarget,
     Loss,
     LossConfig,
-    LocalSnrTarget,
     MaskLoss,
     MultiResSpecLoss,
-    SegSdrLoss,
     SdrLoss,
+    SegSdrLoss,
     SiSdr,
     SpectralLoss,
-    LocalSnrLoss,
 )
 
 __all__ = [

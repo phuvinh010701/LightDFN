@@ -2,6 +2,15 @@
 
 This document describes the dataset acquisition workflow for LightDFN. The pipeline downloads the required corpora, extracts them into a consistent directory layout, applies post-processing where necessary, and generates manifest files for preprocessing and training.
 
+## Prerequisites
+
+Make sure you have the necessary system packages installed before downloading datasets:
+
+```bash
+sudo apt-get update
+sudo apt-get install -y curl aria2 zip unzip ffmpeg
+```
+
 ## Command
 
 Use the repository script directly with CLI flags:
@@ -21,7 +30,7 @@ Use `--profile production` for the full corpus mix. If license confirmation is n
 
 ## Workflow
 
-The `scripts/datasets/download_datasets.sh` script orchestrates six datasets covering clean speech, background noise, music, and room impulse responses.
+The `scripts/datasets/download_datasets.sh` script orchestrates seven datasets covering clean speech, background noise, music, and room impulse responses.
 
 ### VCTK (Clean Speech)
 - **Download**: Fetches `VCTK-Corpus-0.92.zip` from `datashare.is.ed.ac.uk`.
@@ -41,6 +50,11 @@ The `scripts/datasets/download_datasets.sh` script orchestrates six datasets cov
 - **Processing (File List)**: Separated into two distinct lists:
   - Scans the `noise/` directory for `*.wav` -> `lists/musan_noise.txt`.
   - Scans the `music/` directory for `*.wav` -> `lists/musan_music.txt`.
+
+### DNS4 Noise Fullband
+- **Download**: Sourced from Azure Blob Storage (`dns4public.blob.core.windows.net`). Downloads 9 specific `tar.bz2` archives containing `noise_fullband`.
+- **Extraction**: Extracted directly into `raw/dns4/`.
+- **Processing (File List)**: Scans for `*.wav` files and saves paths to `lists/dns4_noise.txt`.
 
 ### FSD50K (General Sound Events - Noise)
 - **Download**: Sourced from `zenodo.org`. This dataset requires complex handling:
@@ -78,6 +92,7 @@ After download and extraction, the base output directory typically looks like th
 │   ├── VCTK-Corpus-0.92/    # VCTK clean speech
 │   ├── LibriSpeech/         # LibriSpeech clean speech
 │   ├── musan/               # MUSAN noise and music
+│   ├── dns4/                # DNS Challenge 4 noise fullband
 │   ├── FSD50K/              # Free Sound Dataset 50K
 │   ├── audb/                # AIR and OpenAIR RIRs
 │   └── AcousticRooms/       # AcousticRooms RIRs
@@ -86,12 +101,13 @@ After download and extraction, the base output directory typically looks like th
     ├── librispeech_clean.txt
     ├── musan_noise.txt
     ├── musan_music.txt
+    ├── dns4_noise.txt
     ├── fsd50k_filtered.txt
     ├── air_rir.txt
     ├── openair_rir.txt
     ├── acousticrooms_rir.txt
     ├── clean_all.txt        # Combined Clean Speech (VCTK + LibriSpeech)
-    ├── noise_music.txt      # Combined Noise & Music (MUSAN + Filtered FSD50K)
+    ├── noise_music.txt      # Combined Noise & Music (MUSAN + DNS4 + Filtered FSD50K)
     └── rir_all.txt          # Combined Room Impulse Responses (AIR + OpenAIR + AcousticRooms)
 ```
 
@@ -102,6 +118,7 @@ LightDFN does not redistribute audio directly. You must accept and comply with t
 - **VCTK**: [Creative Commons Attribution 4.0 International](https://datashare.ed.ac.uk/handle/10283/3443)
 - **LibriSpeech**: [CC BY 4.0](https://www.openslr.org/12/)
 - **MUSAN**: [CC BY 4.0](https://www.openslr.org/17/)
+- **DNS4 Noise Fullband**: [Creative Commons Attribution 4.0 International CC-BY 4.0](https://github.com/microsoft/DNS-Challenge)
 - **FSD50K**: Varied mixed licenses. The download pipeline explicitly enforces filtering to retain only commercially permissive subsets.
 - **AIR**/**OpenAIR**: MIT License (see `raw/audb/db.yaml`)
 - **AcousticRooms**: [License from facebookresearch/AcousticRooms](https://github.com/facebookresearch/AcousticRooms/blob/clean-main/LICENSE)

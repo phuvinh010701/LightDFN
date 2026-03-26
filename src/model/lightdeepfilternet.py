@@ -7,6 +7,7 @@ based on DeepFilterNet3 that replaces all GRU layers with Li-GRU layers for impr
 from functools import partial
 
 import torch
+import torch.nn.functional as F
 from loguru import logger
 from torch import Tensor, nn
 from typing_extensions import Final
@@ -365,49 +366,53 @@ class LightDeepFilteringModule(nn.Module):
         self.num_freqs = num_freqs
         self.frame_size = frame_size
         self.lookahead = lookahead
-        self.pad = nn.ConstantPad2d((0, 0, frame_size - 1 - lookahead, lookahead), 0.0)
+        self._pad_before = frame_size - 1 - lookahead
+        self._pad_after = lookahead
 
     def forward(self, spec: Tensor, coefs: Tensor) -> Tensor:
         """Apply deep filtering coefficients to spectrogram.
 
+        Uses real-valued arithmetic on (real, imag) pairs to stay ONNX-compatible.
+        Mathematically equivalent to the complex-domain formulation.
+
         Args:
-            spec: Complex spectrogram [B, 1, T, F, 2] where F is total frequency bins
-            coefs: Filter coefficients [B, O, T, F_df, 2] where F_df is DF bins (subset)
+            spec: [B, 1, T, F, 2] where the last dim is (real, imag)
+            coefs: [B, O, T, F_df, 2] where the last dim is (real, imag)
 
         Returns:
-            Filtered spectrogram [B, 1, T, F_df, 2] - only processes DF bins
+            Filtered spectrogram [B, 1, T, F, 2]
         """
-        # Convert to complex for efficient operations
-        spec_complex = torch.view_as_complex(spec)  # [B, 1, T, F]
-        coefs_complex = torch.view_as_complex(coefs)  # [B, O, T, F_df]
+        B, _, T, _, _ = spec.shape
 
-        # Apply padding and unfold to get overlapping frames
-        # spec_complex: [B, 1, T, F] -> pad -> [B, 1, T+pad, F] -> unfold -> [B, 1, T, F, O]
         if self.frame_size > 1:
-            spec_padded = self.pad(spec_complex)
-            spec_unfolded = spec_padded.unfold(2, self.frame_size, 1)  # [B, 1, T, F, O]
+            # Pad the T dim (dim 2) of the real tensor; leave last dim (re/im) intact.
+            spec_padded = F.pad(
+                spec, [0, 0, 0, 0, self._pad_before, self._pad_after]
+            )  # [B, 1, T+pad, F, 2]
+            spec_unfolded = spec_padded.unfold(2, self.frame_size, 1)  # [B, 1, T, F, 2, O]
+            spec_unfolded = spec_unfolded.permute(0, 1, 2, 3, 5, 4)   # [B, 1, T, F, O, 2]
         else:
-            spec_unfolded = spec_complex.unsqueeze(-1)  # [B, 1, T, F, 1]
+            spec_unfolded = spec.unsqueeze(4)  # [B, 1, T, F, 1, 2]
 
-        # Extract only DF bins
-        spec_f = spec_unfolded.narrow(-2, 0, self.num_freqs)  # [B, 1, T, F_df, O]
+        # Extract DF bins: [B, 1, T, F_df, O, 2]
+        spec_f = spec_unfolded.narrow(3, 0, self.num_freqs)
 
-        # Reshape coefs: [B, O, T, F_df] -> [B, 1, O, T, F_df]
-        coefs_reshaped = coefs_complex.view(
-            coefs_complex.shape[0],
-            -1,
-            self.frame_size,
-            coefs_complex.shape[2],
-            coefs_complex.shape[3],
-        )  # [B, 1, O, T, F_df]
+        # Reshape coefs: [B, O, T, F_df, 2] -> [B, 1, O, T, F_df, 2]
+        coefs_reshaped = coefs.view(B, -1, self.frame_size, T, self.num_freqs, 2)
 
-        # Apply deep filtering using einsum
-        # spec_f: [B, 1, T, F_df, O]
-        # coefs_reshaped: [B, 1, O, T, F_df]
-        # Result: [B, 1, T, F_df]
-        spec_filtered = torch.einsum("...tfn,...ntf->...tf", spec_f, coefs_reshaped)
-
-        spec[..., : self.num_freqs, :] = torch.view_as_real(spec_filtered)
+        # Complex einsum via real decomposition: (a+bj)(c+dj) = (ac-bd) + (ad+bc)j
+        # spec_f[..., 0/1]: [B, 1, T, F_df, O]   coefs_reshaped[..., 0/1]: [B, 1, O, T, F_df]
+        sr, si = spec_f[..., 0], spec_f[..., 1]
+        cr, ci = coefs_reshaped[..., 0], coefs_reshaped[..., 1]
+        result_r = (
+            torch.einsum("...tfn,...ntf->...tf", sr, cr)
+            - torch.einsum("...tfn,...ntf->...tf", si, ci)
+        )
+        result_i = (
+            torch.einsum("...tfn,...ntf->...tf", sr, ci)
+            + torch.einsum("...tfn,...ntf->...tf", si, cr)
+        )
+        spec[..., : self.num_freqs, :] = torch.stack([result_r, result_i], dim=-1)
         return spec
 
 

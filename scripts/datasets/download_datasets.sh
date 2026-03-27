@@ -1380,41 +1380,46 @@ if [[ "${DOWNLOAD}" == "1" ]]; then
 fi
 
 # Ensure extracted datasets if archives already exist
-if [[ ! -d "${VCTK_DIR}" ]]; then
-  # Check if VCTK was extracted flat into EXTRACT_DIR (no subdirectory)
-  if [[ -d "${EXTRACT_DIR}/wav48_silence_trimmed" && -f "${EXTRACT_DIR}/speaker-info.txt" ]]; then
-    VCTK_DIR="${EXTRACT_DIR}"
-  else
-    mkdir -p "${EXTRACT_DIR}/VCTK-Corpus-0.92"
-    extract_if_present "VCTK" "${DOWNLOAD_DIR}/VCTK-Corpus-0.92.zip" "${EXTRACT_DIR}/VCTK-Corpus-0.92"
-    if [[ -d "${EXTRACT_DIR}/VCTK-Corpus-0.92/wav48_silence_trimmed" ]]; then
-      VCTK_DIR="${EXTRACT_DIR}/VCTK-Corpus-0.92"
-    elif [[ -d "${EXTRACT_DIR}/VCTK-Corpus" ]]; then
-      VCTK_DIR="${EXTRACT_DIR}/VCTK-Corpus"
+if should_download "${DOWNLOAD_VCTK}"; then
+  if [[ ! -d "${VCTK_DIR}" ]]; then
+    # Check if VCTK was extracted flat into EXTRACT_DIR (no subdirectory)
+    if [[ -d "${EXTRACT_DIR}/wav48_silence_trimmed" && -f "${EXTRACT_DIR}/speaker-info.txt" ]]; then
+      VCTK_DIR="${EXTRACT_DIR}"
+    else
+      extract_if_present "VCTK" "${DOWNLOAD_DIR}/VCTK-Corpus-0.92.zip" "${EXTRACT_DIR}/VCTK-Corpus-0.92"
+      if [[ -d "${EXTRACT_DIR}/VCTK-Corpus-0.92/wav48_silence_trimmed" ]]; then
+        VCTK_DIR="${EXTRACT_DIR}/VCTK-Corpus-0.92"
+      elif [[ -d "${EXTRACT_DIR}/VCTK-Corpus" ]]; then
+        VCTK_DIR="${EXTRACT_DIR}/VCTK-Corpus"
+      fi
     fi
   fi
 fi
 
-if [[ ! -d "${LIBRISPEECH_DIR}" ]]; then
-  shopt -s nullglob
-  archives=(
-    "${DOWNLOAD_DIR}"/train-*.tar.gz
-    "${DOWNLOAD_DIR}"/dev-*.tar.gz
-    "${DOWNLOAD_DIR}"/test-*.tar.gz
-  )
-  if (( ${#archives[@]} > 0 )); then
-    echo "[info] extracting LibriSpeech archives from ${DOWNLOAD_DIR}"
-    for tgz in "${archives[@]}"; do
-      extract_archive "${tgz}" "${EXTRACT_DIR}"
-    done
+if should_download "${DOWNLOAD_LIBRISPEECH}"; then
+  if [[ ! -d "${LIBRISPEECH_DIR}" ]]; then
+    shopt -s nullglob
+    archives=(
+      "${DOWNLOAD_DIR}"/train-*.tar.gz
+      "${DOWNLOAD_DIR}"/dev-*.tar.gz
+      "${DOWNLOAD_DIR}"/test-*.tar.gz
+    )
+    if (( ${#archives[@]} > 0 )); then
+      echo "[info] extracting LibriSpeech archives from ${DOWNLOAD_DIR}"
+      for tgz in "${archives[@]}"; do
+        extract_archive "${tgz}" "${EXTRACT_DIR}"
+      done
+    fi
+    shopt -u nullglob
   fi
-  shopt -u nullglob
 fi
 
-if [[ -d "${FSD50K_DIR}" ]]; then
-  # Check for JSON metadata files (the actual format FSD50K uses)
-  if [[ ! -f "${FSD50K_DIR}/FSD50K.metadata/dev_clips_info_FSD50K.json" ]]; then
-    extract_if_present "FSD50K metadata" "${DOWNLOAD_DIR}/FSD50K.metadata.zip" "${FSD50K_DIR}"
+if should_download "${DOWNLOAD_FSD50K}"; then
+  if [[ -d "${FSD50K_DIR}" ]]; then
+    # Check for JSON metadata files (the actual format FSD50K uses)
+    if [[ ! -f "${FSD50K_DIR}/FSD50K.metadata/dev_clips_info_FSD50K.json" ]]; then
+      extract_if_present "FSD50K metadata" "${DOWNLOAD_DIR}/FSD50K.metadata.zip" "${FSD50K_DIR}"
+    fi
   fi
 fi
 

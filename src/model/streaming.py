@@ -84,16 +84,16 @@ class StreamingLightDFN(nn.Module):
 
     def forward(
         self,
-        spec: Tensor,       # [1, 1, 1, F, 2]
-        feat_erb: Tensor,   # [1, 1, 1, E]
+        spec: Tensor,  # [1, 1, 1, F, 2]
+        feat_erb: Tensor,  # [1, 1, 1, E]
         feat_spec: Tensor,  # [1, 1, 1, F', 2]
-        h_enc: Tensor,      # [enc_layers, 1, emb_hidden_dim]
-        h_erb: Tensor,      # [erb_layers, 1, emb_hidden_dim]
-        h_df: Tensor,       # [df_layers,  1, df_hidden_dim]
-        buf_erb0: Tensor,   # [1, 1, 2, nb_erb]
-        buf_df0: Tensor,    # [1, 2, 2, nb_spec]
-        buf_dfp: Tensor,    # [1, conv_ch, 4, nb_spec]
-        buf_spec: Tensor,   # [1, 1, _pad_before, F, 2]  causal spec context for df_op
+        h_enc: Tensor,  # [enc_layers, 1, emb_hidden_dim]
+        h_erb: Tensor,  # [erb_layers, 1, emb_hidden_dim]
+        h_df: Tensor,  # [df_layers,  1, df_hidden_dim]
+        buf_erb0: Tensor,  # [1, 1, 2, nb_erb]
+        buf_df0: Tensor,  # [1, 2, 2, nb_spec]
+        buf_dfp: Tensor,  # [1, conv_ch, 4, nb_spec]
+        buf_spec: Tensor,  # [1, 1, _pad_before, F, 2]  causal spec context for df_op
     ) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]:
         """Process one STFT frame.
 
@@ -155,29 +155,47 @@ class StreamingLightDFN(nn.Module):
         # 5-frame window uses real past data instead of zeros.
         # Window built: [spec_{t-2}, spec_{t-1}, spec_t, 0, 0]
         df_op = m.df_op
-        spec_ctx = torch.cat([buf_spec, spec], dim=2)          # [B, 1, _pad_before+1, F, 2]
-        buf_spec_new = torch.cat([buf_spec[:, :, 1:, :, :], spec], dim=2)  # slide window
-        spec_padded = F.pad(spec_ctx, [0, 0, 0, 0, 0, df_op._pad_after])  # [B, 1, frame_size, F, 2]
-        spec_unfolded = spec_padded.unfold(2, df_op.frame_size, 1)         # [B, 1, 1, F, 2, O]
-        spec_unfolded = spec_unfolded.permute(0, 1, 2, 3, 5, 4)           # [B, 1, 1, F, O, 2]
-        spec_f = spec_unfolded.narrow(3, 0, df_op.num_freqs)               # [B, 1, 1, F_df, O, 2]
+        spec_ctx = torch.cat([buf_spec, spec], dim=2)  # [B, 1, _pad_before+1, F, 2]
+        buf_spec_new = torch.cat(
+            [buf_spec[:, :, 1:, :, :], spec], dim=2
+        )  # slide window
+        spec_padded = F.pad(
+            spec_ctx, [0, 0, 0, 0, 0, df_op._pad_after]
+        )  # [B, 1, frame_size, F, 2]
+        # spec_padded [B, 1, frame_size, F, 2] contains exactly one frame_size window.
+        # unfold(2, frame_size, 1) is unsupported by the TorchScript ONNX exporter.
+        # Equivalent (single-window) replacement: permute dims to [B, 1, F, frame_size, 2]
+        # then unsqueeze the T=1 axis → [B, 1, 1, F, frame_size=O, 2].
+        spec_unfolded = spec_padded.permute(0, 1, 3, 2, 4).unsqueeze(
+            2
+        )  # [B, 1, 1, F, O, 2]
+        spec_f = spec_unfolded.narrow(3, 0, df_op.num_freqs)  # [B, 1, 1, F_df, O, 2]
 
         coefs_r = df_coefs.view(b, -1, df_op.frame_size, t, df_op.num_freqs, 2)
         sr, si = spec_f[..., 0], spec_f[..., 1]
         cr, ci = coefs_r[..., 0], coefs_r[..., 1]
-        result_r = (
-            torch.einsum("...tfn,...ntf->...tf", sr, cr)
-            - torch.einsum("...tfn,...ntf->...tf", si, ci)
+        result_r = torch.einsum("...tfn,...ntf->...tf", sr, cr) - torch.einsum(
+            "...tfn,...ntf->...tf", si, ci
         )
-        result_i = (
-            torch.einsum("...tfn,...ntf->...tf", sr, ci)
-            + torch.einsum("...tfn,...ntf->...tf", si, cr)
+        result_i = torch.einsum("...tfn,...ntf->...tf", sr, ci) + torch.einsum(
+            "...tfn,...ntf->...tf", si, cr
         )
-        spec_e = spec.clone()
-        spec_e[..., : df_op.num_freqs, :] = torch.stack([result_r, result_i], dim=-1)
-        spec_e[..., m.nb_df :, :] = spec_m[..., m.nb_df :, :]
+        # Avoid in-place index assignments (not supported by TorchScript ONNX exporter).
+        # Concatenate the DF-filtered low bands with the ERB-masked high bands.
+        df_out = torch.stack([result_r, result_i], dim=-1)  # [B, 1, 1, nb_df, 2]
+        erb_out = spec_m[..., m.nb_df :, :]  # [B, 1, 1, F-nb_df, 2]
+        spec_e = torch.cat([df_out, erb_out], dim=-2)  # [B, 1, 1, F, 2]
 
-        return spec_e, h_enc_new, h_erb_new, h_df_new, buf_erb0_new, buf_df0_new, buf_dfp_new, buf_spec_new
+        return (
+            spec_e,
+            h_enc_new,
+            h_erb_new,
+            h_df_new,
+            buf_erb0_new,
+            buf_df0_new,
+            buf_dfp_new,
+            buf_spec_new,
+        )
 
     # ------------------------------------------------------------------
     # Helpers to create zero-filled initial states
@@ -189,16 +207,16 @@ class StreamingLightDFN(nn.Module):
         """Return zero-initialised (h_enc, h_erb, h_df, buf_erb0, buf_df0, buf_dfp, buf_spec)."""
         enc_layers = len(self.model.enc.emb_gru.ligru.rnn)
         erb_layers = len(self.model.erb_dec.emb_gru.ligru.rnn)
-        df_layers  = len(self.model.df_dec.df_gru.ligru.rnn)
+        df_layers = len(self.model.df_dec.df_gru.ligru.rnn)
         emb_dim = self.model.enc.emb_gru.hidden_size
-        df_dim  = self.model.df_dec.df_gru.hidden_size
+        df_dim = self.model.df_dec.df_gru.hidden_size
 
         def _z(*shape):
             return torch.zeros(*shape, device=device)
 
         h_enc = _z(enc_layers, batch_size, emb_dim)
         h_erb = _z(erb_layers, batch_size, emb_dim)
-        h_df  = _z(df_layers,  batch_size, df_dim)
+        h_df = _z(df_layers, batch_size, df_dim)
 
         # Infer conv buffer shapes from model weight shapes
         # erb_conv0: in_ch=1, kt=3 → buf [B, 1, 2, nb_erb]
@@ -229,7 +247,7 @@ class StreamingLightDFN(nn.Module):
         # df_conv0 input is feat_spec_in [B, 2, 1, nb_spec].
         # Run a tiny dummy to get exact shapes.
         with torch.no_grad():
-            dummy_erb = torch.zeros(1, 1, 1, nb_erb, device=device)
+            _ = torch.zeros(1, 1, 1, nb_erb, device=device)
             # Find nb_spec from the df_conv1 output shape via df_conv0 chain
             # We know df_conv0 input has 2 channels and nb_spec F bins.
             # Check df_conv0[first Conv2d].weight: shape (out, in//g, kt, kf)

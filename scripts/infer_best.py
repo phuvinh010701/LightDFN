@@ -128,12 +128,46 @@ def enhance_file(
     feat_spec_c = spec_normed.permute(0, 2, 1).contiguous()  # [B, T, F']
     feat_spec = torch.view_as_real(feat_spec_c).unsqueeze(1)  # [B, 1, T, F', 2]
 
-    # --- Forward ---
-    enhanced_spec, _mask, _lsnr, _df_coefs = model(spec_noisy, feat_erb_norm, feat_spec)
+    # --- Forward (chunked to avoid GRU state drift beyond training window) ---
+    # The model is trained on short clips (~3 s = ~300 frames).  Processing the
+    # full sequence in one shot causes the GRU hidden state to drift far outside
+    # the training distribution, producing near-silent output after a few seconds.
+    # We therefore process in CHUNK_FRAMES-sized windows (matching the ONNX
+    # chunked export) with zero hidden-state reset between chunks, exactly
+    # matching the training regime.
+    CHUNK_FRAMES = 512
+    enhanced_chunks: list[torch.Tensor] = []
+    for chunk_start in range(0, T_frames, CHUNK_FRAMES):
+        chunk_end = min(chunk_start + CHUNK_FRAMES, T_frames)
+        chunk_len = chunk_end - chunk_start
+
+        spec_chunk = spec_noisy[:, :, chunk_start:chunk_end]
+        erb_chunk = feat_erb_norm[:, :, chunk_start:chunk_end]
+        fspec_chunk = feat_spec[:, :, chunk_start:chunk_end]
+
+        # Pad last (possibly short) chunk to CHUNK_FRAMES so the LiGRU
+        # batch_size pre-allocation stays consistent.
+        if chunk_len < CHUNK_FRAMES:
+            pad = CHUNK_FRAMES - chunk_len
+            # F.pad order is (last_dim, 2nd_last, 3rd_last, …), each as (left, right).
+            # spec_chunk [B, 1, T, F, 2]: pad T (3rd-from-last) → 6 values
+            spec_chunk = torch.nn.functional.pad(spec_chunk, (0, 0, 0, 0, 0, pad))
+            # erb_chunk [B, 1, T, E]: pad T (2nd-from-last) → 4 values
+            erb_chunk = torch.nn.functional.pad(erb_chunk, (0, 0, 0, pad))
+            # fspec_chunk [B, 1, T, F', 2]: pad T (3rd-from-last) → 6 values
+            fspec_chunk = torch.nn.functional.pad(fspec_chunk, (0, 0, 0, 0, 0, pad))
+
+        enh_chunk, _, _, _ = model(spec_chunk, erb_chunk, fspec_chunk)
+        enhanced_chunks.append(enh_chunk[:, :, :chunk_len])  # trim padding
+
+    enhanced_spec = torch.cat(enhanced_chunks, dim=2)
 
     # --- Back to waveform ---
     enhanced = _spec_to_audio(
-        enhanced_spec, model_cfg.fft_size, model_cfg.hop_size, window
+        enhanced_spec.nan_to_num(nan=0.0, posinf=0.0, neginf=0.0),
+        model_cfg.fft_size,
+        model_cfg.hop_size,
+        window,
     )
     enhanced = enhanced.squeeze(0).detach().cpu()
 

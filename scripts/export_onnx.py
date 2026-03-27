@@ -6,19 +6,19 @@ four outputs (enhanced_spec, erb_mask, lsnr, df_coefs), matching the PyTorch
 forward signature exactly.
 
 Example:
-  python3 scripts/export_onnx.py \\
+  uv run python -m scripts.export_onnx \\
     --ckpt checkpoints/best.pt \\
     --out checkpoints/lightdfn.onnx \\
     --config src/configs/default.yaml
 
   # With onnxruntime verification:
-  python3 scripts/export_onnx.py \\
+  uv run python -m scripts.export_onnx \\
     --ckpt checkpoints/best.pt \\
     --out checkpoints/lightdfn.onnx \\
     --verify
 
   # With onnx-simplifier post-processing:
-  python3 scripts/export_onnx.py \\
+  uv run python -m scripts.export_onnx \\
     --ckpt checkpoints/best.pt \\
     --out checkpoints/lightdfn.onnx \\
     --simplify
@@ -58,8 +58,8 @@ def build_dummy_inputs(
     """
     B = 1
     F = model_cfg.fft_size // 2 + 1  # 481
-    E = model_cfg.nb_erb              # 32
-    Fc = loader_cfg.nb_spec           # 96
+    E = model_cfg.nb_erb  # 32
+    Fc = loader_cfg.nb_spec  # 96
 
     spec = torch.randn(B, 1, T, F, 2, device=device)
     feat_erb = torch.randn(B, 1, T, E, device=device)
@@ -77,7 +77,9 @@ def export(
     verify: bool = False,
     simplify: bool = False,
 ) -> None:
-    model_cfg, _aug_cfg, loader_cfg, _train_cfg, _loss_cfg = load_config(str(config_path))
+    model_cfg, _aug_cfg, loader_cfg, _train_cfg, _loss_cfg = load_config(
+        str(config_path)
+    )
 
     # Li-GRU requires batch_size at construction; use 1 for export.
     model_cfg.batch_size = 1
@@ -93,25 +95,33 @@ def export(
     if streaming:
         _export_streaming(model, model_cfg, loader_cfg, out_path, opset, device)
     else:
-        _export_chunked(model, model_cfg, loader_cfg, out_path, chunk_frames, opset, device)
+        _export_chunked(
+            model, model_cfg, loader_cfg, out_path, chunk_frames, opset, device
+        )
 
-    _postprocess(out_path, simplify, verify, model_cfg, loader_cfg, device)
+    _postprocess(out_path, simplify, verify)
 
 
-def _export_chunked(model, model_cfg, loader_cfg, out_path, chunk_frames, opset, device):
+def _export_chunked(
+    model, model_cfg, loader_cfg, out_path, chunk_frames, opset, device
+):
     """Export fixed-chunk model (processes chunk_frames STFT frames per call)."""
     # NOTE: The LiGRU cell uses a Python for-loop over the time axis, which
     # forces T to be a static constant in the exported graph.  We therefore
     # export with a fixed chunk size; the inference script pads/chunks audio
     # to match this size at runtime.
-    dummy_inputs = build_dummy_inputs(model_cfg, loader_cfg, T=chunk_frames, device=device)
+    dummy_inputs = build_dummy_inputs(
+        model_cfg, loader_cfg, T=chunk_frames, device=device
+    )
     spec, feat_erb, feat_spec = dummy_inputs
 
     with torch.no_grad():
         out = model(spec, feat_erb, feat_spec)
     print(f"PyTorch forward pass OK — outputs: {[list(o.shape) for o in out]}")
-    print(f"Chunk size: {chunk_frames} frames  "
-          f"({chunk_frames * model_cfg.hop_size / model_cfg.sr:.2f} s at {model_cfg.sr} Hz)")
+    print(
+        f"Chunk size: {chunk_frames} frames  "
+        f"({chunk_frames * model_cfg.hop_size / model_cfg.sr:.2f} s at {model_cfg.sr} Hz)"
+    )
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
     print(f"Exporting to {out_path}  (opset={opset}) …")
@@ -123,7 +133,7 @@ def _export_chunked(model, model_cfg, loader_cfg, out_path, chunk_frames, opset,
         output_names=["enhanced_spec", "erb_mask", "lsnr", "df_coefs"],
         opset_version=opset,
         export_params=True,
-        dynamo=True,
+        dynamo=False,
     )
     print("Export done.")
 
@@ -134,13 +144,19 @@ def _export_streaming(model, model_cfg, loader_cfg, out_path, opset, device):
     wrapper.eval()
 
     dummy_frame = build_dummy_inputs(model_cfg, loader_cfg, T=1, device=device)
-    h_enc, h_erb, h_df, buf_erb0, buf_df0, buf_dfp, buf_spec = wrapper.init_states(batch_size=1, device=device)
+    h_enc, h_erb, h_df, buf_erb0, buf_df0, buf_dfp, buf_spec = wrapper.init_states(
+        batch_size=1, device=device
+    )
 
     with torch.no_grad():
-        out = wrapper(*dummy_frame, h_enc, h_erb, h_df, buf_erb0, buf_df0, buf_dfp, buf_spec)
+        out = wrapper(
+            *dummy_frame, h_enc, h_erb, h_df, buf_erb0, buf_df0, buf_dfp, buf_spec
+        )
     print(f"Streaming forward pass OK — outputs: {[list(o.shape) for o in out]}")
-    print(f"Streaming: 1 frame per call  "
-          f"({model_cfg.hop_size / model_cfg.sr * 1000:.1f} ms per call at {model_cfg.sr} Hz)")
+    print(
+        f"Streaming: 1 frame per call  "
+        f"({model_cfg.hop_size / model_cfg.sr * 1000:.1f} ms per call at {model_cfg.sr} Hz)"
+    )
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
     print(f"Exporting to {out_path}  (opset={opset}, streaming=True) …")
@@ -149,23 +165,37 @@ def _export_streaming(model, model_cfg, loader_cfg, out_path, opset, device):
         args=(*dummy_frame, h_enc, h_erb, h_df, buf_erb0, buf_df0, buf_dfp, buf_spec),
         f=str(out_path),
         input_names=[
-            "spec", "feat_erb", "feat_spec",
-            "h_enc", "h_erb", "h_df",
-            "buf_erb0", "buf_df0", "buf_dfp", "buf_spec",
+            "spec",
+            "feat_erb",
+            "feat_spec",
+            "h_enc",
+            "h_erb",
+            "h_df",
+            "buf_erb0",
+            "buf_df0",
+            "buf_dfp",
+            "buf_spec",
         ],
         output_names=[
             "enhanced_spec",
-            "h_enc_new", "h_erb_new", "h_df_new",
-            "buf_erb0_new", "buf_df0_new", "buf_dfp_new", "buf_spec_new",
+            "h_enc_new",
+            "h_erb_new",
+            "h_df_new",
+            "buf_erb0_new",
+            "buf_df0_new",
+            "buf_dfp_new",
+            "buf_spec_new",
         ],
         opset_version=opset,
         export_params=True,
-        dynamo=True,
+        dynamo=False,  # dynamo=True mis-traces Li-GRU's list-append hidden-state pattern,
+        # causing the output hidden states to be constants (not updated).
+        # Use the TorchScript-based exporter for correct state threading.
     )
     print("Export done.")
 
 
-def _postprocess(out_path, simplify, _verify, model_cfg, loader_cfg, device):
+def _postprocess(out_path, simplify, _verify):
     # ------------------------------------------------------------------ #
     # Optional: onnx-simplifier
     # ------------------------------------------------------------------ #
@@ -183,7 +213,9 @@ def _postprocess(out_path, simplify, _verify, model_cfg, loader_cfg, device):
             else:
                 print("Warning: simplification check failed; keeping original.")
         except (ImportError, Exception) as e:
-            print(f"onnx-simplifier skipped ({e}); install with: pip install onnxsim onnxruntime")
+            print(
+                f"onnx-simplifier skipped ({e}); install with: pip install onnxsim onnxruntime"
+            )
 
     # ------------------------------------------------------------------ #
     # Print model info
@@ -193,7 +225,7 @@ def _postprocess(out_path, simplify, _verify, model_cfg, loader_cfg, device):
 
         m = onnx.load(str(out_path))
         size_mb = out_path.stat().st_size / 1024 / 1024
-        print(f"\nONNX model info:")
+        print("\nONNX model info:")
         print(f"  Path:    {out_path}")
         print(f"  Size:    {size_mb:.1f} MB")
         print(f"  Opset:   {m.opset_import[0].version}")
@@ -229,16 +261,16 @@ def main() -> None:
         "--streaming",
         action="store_true",
         help="Export streaming model (T=1 per call, hidden states as I/O). "
-             "Processes one hop (480 samples) per call. "
-             "Ignores --chunk-frames.",
+        "Processes one hop (480 samples) per call. "
+        "Ignores --chunk-frames.",
     )
     parser.add_argument(
         "--chunk-frames",
         type=int,
         default=512,
         help="Fixed time frames per chunk exported into the ONNX model "
-             "(default: 512 ≈ 5 s at 48 kHz / hop 480). "
-             "Inference script will pad/chunk audio to match this.",
+        "(default: 512 ≈ 5 s at 48 kHz / hop 480). "
+        "Inference script will pad/chunk audio to match this.",
     )
     parser.add_argument(
         "--opset",

@@ -85,7 +85,8 @@ def _running_unit_norm(spec: Tensor, alpha: float) -> Tensor:
     one_minus_alpha = 1.0 - alpha
     for t in range(T):
         frame = spec[:, :, t]
-        state = frame.abs() * one_minus_alpha + state * alpha
+        # Clamp prevents underflow during silence: state → 0 would make frame/sqrt(state) → Inf/NaN.
+        state = (frame.abs() * one_minus_alpha + state * alpha).clamp(min=1e-10)
         out[:, :, t] = frame / state.sqrt()
     return out
 

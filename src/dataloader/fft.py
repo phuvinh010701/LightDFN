@@ -6,8 +6,9 @@ import torch
 from torch import Tensor
 from torch.utils.data import Dataset
 
-from src.dataloader.td import Sample, TdDataset
+from src.dataloader.td import TdDataset
 from src.utils.erb import create_erb_fb, erb_fb_widths
+from src.types import Sample
 
 
 def _norm_alpha(sr: int, hop_size: int, norm_tau: float) -> float:

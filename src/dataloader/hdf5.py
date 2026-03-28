@@ -32,8 +32,8 @@ class Hdf5Dataset:
         self.max_len_s = max_len_s
 
         with h5py.File(file_path, "r") as f:
-            self.sr: int = int(f.attrs["sr"].item())  # type: ignore[union-attr]
-            self.max_freq: int = int(f.attrs["max_freq"].item())  # type: ignore[union-attr]
+            self.sr: int = int(f.attrs["sr"].item())
+            self.max_freq: int = int(f.attrs["max_freq"].item())
             self.dataset_type: AudioDatasetType = list(f.keys())[0]
 
             group = f[self.dataset_type]
@@ -56,8 +56,8 @@ class Hdf5Dataset:
         """Return one sample ``(channels, samples)``, cropping with *rng* if needed."""
         key = self.keys[idx % len(self.keys)]
         ds = self._file[f"{self.dataset_type}/{key}"]
-        assert isinstance(ds, h5py.Dataset)
-        audio: np.ndarray = ds[:]  # type: ignore[assignment]
+
+        audio = np.asarray(ds[:])
 
         if self.max_len_s is not None:
             max_samples = int(self.max_len_s * self.sr)

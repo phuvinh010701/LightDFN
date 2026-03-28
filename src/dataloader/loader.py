@@ -2,7 +2,6 @@
 
 import math
 from collections.abc import Iterator
-from dataclasses import dataclass
 
 import numpy as np
 import torch
@@ -13,37 +12,8 @@ from torch.utils.data import DataLoader, Dataset, Sampler
 from src.configs.config import AugmentationConfig, DataLoaderConfig
 from src.dataloader.dataset_config import DatasetEntry
 from src.dataloader.fft import FftDataset
-from src.dataloader.td import Sample, TdDataset
-from src.types import SplitType
-
-
-@dataclass
-class DsBatch:
-    """A collated batch of :class:`~src.dataloader.td.Sample` objects.
-
-    Attributes:
-        speech:    ``(batch, channels, samples)``
-        noisy:     ``(batch, channels, samples)``
-        noise:     ``(batch, channels, samples)``
-        lengths:   Original sample lengths before padding, shape ``(batch,)``
-        snr:       SNR values, shape ``(batch,)``
-        gain:      Gain values, shape ``(batch,)``
-        max_freq:  Bandwidth values, shape ``(batch,)``
-        sample_id: Dataset indices, shape ``(batch,)``
-        feat_erb:  ``(batch, channels, frames, nb_erb)``
-        feat_spec: ``(batch, channels, frames, nb_spec)``
-    """
-
-    speech: Tensor
-    noisy: Tensor
-    noise: Tensor
-    feat_erb: Tensor
-    feat_spec: Tensor
-    lengths: np.ndarray
-    snr: np.ndarray
-    gain: np.ndarray
-    max_freq: np.ndarray
-    sample_id: np.ndarray
+from src.dataloader.td import TdDataset
+from src.types import DsBatch, Sample, SplitType
 
 
 def collate_fn(samples: list[Sample]) -> DsBatch:

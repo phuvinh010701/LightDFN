@@ -352,16 +352,7 @@ class LightDfDecoder(nn.Module):
 
 
 class LightDeepFilteringModule(nn.Module):
-    """Optimized deep filtering using unfold + einsum.
-
-    Args:
-        num_freqs (int): Number of frequency bins to filter (``nb_df``).
-        frame_size (int): Multi-frame filter order.
-        lookahead (int): Number of future frames visible to the filter.
-    """
-
     def __init__(self, num_freqs: int, frame_size: int, lookahead: int = 0) -> None:
-        """Initialise LightDeepFilteringModule."""
         super().__init__()
         self.num_freqs = num_freqs
         self.frame_size = frame_size
@@ -370,50 +361,48 @@ class LightDeepFilteringModule(nn.Module):
         self._pad_after = lookahead
 
     def forward(self, spec: Tensor, coefs: Tensor) -> Tensor:
-        """Apply deep filtering coefficients to spectrogram.
-
-        Uses real-valued arithmetic on (real, imag) pairs to stay ONNX-compatible.
-        Mathematically equivalent to the complex-domain formulation.
-
-        Args:
-            spec: [B, 1, T, F, 2] where the last dim is (real, imag)
-            coefs: [B, O, T, F_df, 2] where the last dim is (real, imag)
-
-        Returns:
-            Filtered spectrogram [B, 1, T, F, 2]
         """
-        B, _, T, _, _ = spec.shape
+        spec:  [B, 1, T, F, 2]
+        coefs: [B, O, T, F_df, 2]
+        """
+        B, C, T, Freq, _ = spec.shape
+        O = self.frame_size
+        F_df = self.num_freqs
 
-        if self.frame_size > 1:
-            # Pad the T dim (dim 2) of the real tensor; leave last dim (re/im) intact.
+        # Build temporal window: [B, 1, T, F, O, 2]
+        if O > 1:
             spec_padded = F.pad(
                 spec, [0, 0, 0, 0, self._pad_before, self._pad_after]
             )  # [B, 1, T+pad, F, 2]
-            spec_unfolded = spec_padded.unfold(2, self.frame_size, 1)  # [B, 1, T, F, 2, O]
-            spec_unfolded = spec_unfolded.permute(0, 1, 2, 3, 5, 4)   # [B, 1, T, F, O, 2]
+
+            # unfold gives [B, 1, T, F, 2, O]
+            spec_win = spec_padded.unfold(2, O, 1).movedim(-1, -2)
+            # -> [B, 1, T, F, O, 2]
         else:
-            spec_unfolded = spec.unsqueeze(4)  # [B, 1, T, F, 1, 2]
+            spec_win = spec.unsqueeze(-2)  # [B, 1, T, F, 1, 2]
 
-        # Extract DF bins: [B, 1, T, F_df, O, 2]
-        spec_f = spec_unfolded.narrow(3, 0, self.num_freqs)
+        # Only DF bins
+        spec_win = spec_win[:, :, :, :F_df, :, :]  # [B, 1, T, F_df, O, 2]
 
-        # Reshape coefs: [B, O, T, F_df, 2] -> [B, 1, O, T, F_df, 2]
-        coefs_reshaped = coefs.view(B, -1, self.frame_size, T, self.num_freqs, 2)
+        # Reorder coefs to match spec layout: [B, 1, T, F_df, O, 2]
+        coefs = coefs.permute(0, 2, 3, 1, 4).unsqueeze(1)
 
-        # Complex einsum via real decomposition: (a+bj)(c+dj) = (ac-bd) + (ad+bc)j
-        # spec_f[..., 0/1]: [B, 1, T, F_df, O]   coefs_reshaped[..., 0/1]: [B, 1, O, T, F_df]
-        sr, si = spec_f[..., 0], spec_f[..., 1]
-        cr, ci = coefs_reshaped[..., 0], coefs_reshaped[..., 1]
-        result_r = (
-            torch.einsum("...tfn,...ntf->...tf", sr, cr)
-            - torch.einsum("...tfn,...ntf->...tf", si, ci)
-        )
-        result_i = (
-            torch.einsum("...tfn,...ntf->...tf", sr, ci)
-            + torch.einsum("...tfn,...ntf->...tf", si, cr)
-        )
-        spec[..., : self.num_freqs, :] = torch.stack([result_r, result_i], dim=-1)
-        return spec
+        # Real/imag parts
+        sr = spec_win[..., 0]
+        si = spec_win[..., 1]
+        cr = coefs[..., 0]
+        ci = coefs[..., 1]
+
+        # Complex multiply + sum over frame axis O
+        result_r = (sr * cr - si * ci).sum(dim=-1)  # [B, 1, T, F_df]
+        result_i = (sr * ci + si * cr).sum(dim=-1)  # [B, 1, T, F_df]
+
+        filtered = torch.stack((result_r, result_i), dim=-1)  # [B, 1, T, F_df, 2]
+
+        # Avoid modifying input in-place unless you really want that behavior
+        out = spec.clone()
+        out[:, :, :, :F_df, :] = filtered
+        return out
 
 
 class LightDeepFilterNet(nn.Module):

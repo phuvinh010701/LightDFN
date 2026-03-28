@@ -2,228 +2,27 @@
 
 import bisect
 import logging
-from dataclasses import dataclass
 
 import h5py
 import numpy as np
 import torch
 from torch import Tensor
 from torch.utils.data import Dataset
-from torch_audiomentations import Compose
 
 from src.augmentations import (
     get_noise_augmentations,
     get_speech_augmentations,
     get_speech_distortions_td,
+    apply_augmentations,
 )
 from src.configs.config import AugmentationConfig
 from src.dataloader.dataset_config import DatasetConfig, DatasetEntry
 from src.dataloader.hdf5 import Hdf5Dataset
-from src.types import SplitType
+from src.types import SplitType, TdSample
+from src.utils.audio import adjust_channels_jointly, combine_noises, fft_convolve, mix_audio_signal
+from src.utils.dataloader import lookup
 
 logger = logging.getLogger(__name__)
-
-
-_EPS = 1e-10
-
-
-@dataclass
-class TdSample:
-    """Internal sample produced by :class:`TdDataset` before frequency-domain features.
-
-    Attributes:
-        speech:    Clean target signal, shape ``(channels, samples)``.
-        noisy:     Degraded mixture (model input), shape ``(channels, samples)``.
-        noise:     Scaled noise component in the mixture, shape ``(channels, samples)``.
-        snr:       Target SNR in dB.
-        gain:      Applied gain in dB.
-        max_freq:  Signal bandwidth in Hz.
-        sample_id: Dataset index.
-    """
-
-    speech: Tensor
-    noisy: Tensor
-    noise: Tensor
-    snr: int
-    gain: int
-    max_freq: int
-    sample_id: int
-
-
-@dataclass
-class Sample:
-    """Full training sample produced by :class:`~src.dataloader.fft.FftDataset`.
-
-    Extends :class:`TdSample` with frequency-domain features computed from the
-    noisy signal. All fields are required — no Optional.
-
-    Attributes:
-        speech:    Clean target signal, shape ``(channels, samples)``.
-        noisy:     Degraded mixture (model input), shape ``(channels, samples)``.
-        noise:     Scaled noise component in the mixture, shape ``(channels, samples)``.
-        snr:       Target SNR in dB.
-        gain:      Applied gain in dB.
-        max_freq:  Signal bandwidth in Hz.
-        sample_id: Dataset index.
-        feat_erb:  ERB filterbank features, shape ``(channels, frames, nb_erb)``.
-        feat_spec: Complex spectrogram features, shape ``(channels, frames, nb_spec)``.
-    """
-
-    speech: Tensor
-    noisy: Tensor
-    noise: Tensor
-    snr: int
-    gain: int
-    max_freq: int
-    sample_id: int
-    feat_erb: Tensor
-    feat_spec: Tensor
-
-
-def _apply_aug(pipeline: Compose, audio: Tensor, sr: int) -> Tensor:
-    """Run a torch-audiomentations pipeline on a ``(C, T)`` Tensor.
-
-    Returns a ``(C, T)`` Tensor.
-    """
-    out = pipeline(audio.unsqueeze(0), sample_rate=sr)  # (1, C, T)
-    return out.squeeze(0)  # (C, T)
-
-
-def _fft_convolve(signal: Tensor, kernel: Tensor) -> Tensor:
-    """FFT convolution of a ``(C, T)`` signal with a 1-D kernel, trimmed to T."""
-    out_len = signal.shape[1]
-    n = 1 << (out_len + kernel.shape[0] - 2).bit_length()
-    K = torch.fft.rfft(kernel, n=n)  # [n//2+1]
-    S = torch.fft.rfft(signal, n=n)  # [C, n//2+1]
-    return torch.fft.irfft(S * K, n=n)[:, :out_len]  # [C, out_len]
-
-
-def _combine_noises(
-    noises: list[Tensor],
-    num_channels: int,
-    target_length: int,
-    rng: np.random.Generator,
-) -> Tensor:
-    """Combine a list of noise tensors into one (num_channels, target_length) tensor."""
-    processed: list[Tensor] = []
-
-    for noise in noises:
-        c, t = noise.shape
-
-        if t == 0:
-            noise = torch.zeros(
-                (c, target_length),
-                dtype=noise.dtype,
-                device=noise.device,
-            )
-        elif t < target_length:
-            idx = torch.arange(target_length, device=noise.device) % t
-            noise = noise[:, idx]
-        elif t > target_length:
-            start = int(rng.integers(0, t - target_length + 1))
-            noise = noise[:, start : start + target_length]
-
-        c = noise.shape[0]
-
-        if c < num_channels:
-            extra = num_channels - c
-            extra_idx = rng.integers(0, c, size=extra)
-            idx = np.concatenate([np.arange(c), extra_idx])
-            noise = noise[torch.as_tensor(idx, device=noise.device)]
-        elif c > num_channels:
-            idx = np.sort(rng.choice(c, num_channels, replace=False))
-            noise = noise[torch.as_tensor(idx, device=noise.device)]
-
-        processed.append(noise)
-
-    return torch.stack(processed, dim=0).mean(dim=0)
-
-
-def _mix_audio_signal(
-    clean: Tensor,
-    noise: Tensor,
-    snr_db: float,
-    gain_db: float,
-    clean_distorted: Tensor | None = None,
-) -> tuple[Tensor, Tensor, Tensor]:
-    """Mix clean speech and noise at a target SNR with anti-clipping protection.
-
-    Returns ``(clean_out, noise_out, mixture)``.
-    """
-    gain_linear = 10.0 ** (gain_db / 20.0)
-    clean_out: Tensor = clean * gain_linear
-    clean_mix = (
-        (clean_distorted * gain_linear)
-        if clean_distorted is not None
-        else clean_out.clone()
-    )
-
-    e_clean = clean_out.pow(2).sum().clamp(min=_EPS)
-    e_noise = noise.pow(2).sum().clamp(min=_EPS)
-    snr_linear = 10.0 ** (snr_db / 10.0)
-    scale: Tensor = (e_clean / (e_noise * snr_linear)).sqrt()
-    noise_out = noise * scale
-
-    mixture = clean_mix + noise_out
-
-    max_all = max(
-        clean_out.abs().max().item(),
-        noise_out.abs().max().item(),
-        mixture.abs().max().item(),
-    )
-    if max_all - 1.0 > _EPS:
-        sf = 1.0 / (max_all + _EPS)
-        clean_out = clean_out * sf
-        noise_out = noise_out * sf
-        mixture = mixture * sf
-
-    return clean_out, noise_out, mixture
-
-
-def _adjust_channels_jointly(
-    num_channels: int,
-    rng: np.random.Generator,
-    *tensors: Tensor,
-) -> tuple[Tensor, ...]:
-    """Adjust a group of ``(C, T)`` tensors to exactly ``num_channels`` channels.
-
-    All tensors receive the **same** channel indices so that linear relationships
-    (e.g. ``noisy == speech + noise``) are preserved after the adjustment.
-
-    Note:
-        When ``c == num_channels`` the original tensors are returned as-is
-        (no copy).  Callers must not mutate them in place.
-    """
-    c = tensors[0].shape[0]
-
-    if not all(t.shape[0] == c for t in tensors[1:]):
-        raise ValueError(
-            f"all tensors must have the same channel count, "
-            f"got {[t.shape[0] for t in tensors]}"
-        )
-
-    if c == num_channels:
-        return tensors
-
-    if c < num_channels:
-        ch_idx = torch.as_tensor(
-            rng.integers(0, c, size=num_channels - c), dtype=torch.long
-        )
-        return tuple(torch.cat([t, t[ch_idx]], dim=0) for t in tensors)
-
-    ch_idx = torch.as_tensor(
-        rng.choice(c, num_channels, replace=False), dtype=torch.long
-    )
-    return tuple(t[ch_idx] for t in tensors)
-
-
-def _lookup(
-    datasets: list[Hdf5Dataset], cum: list[int], idx: int
-) -> tuple[Hdf5Dataset, int]:
-    """Translate a flat index into ``(dataset, key_idx)`` using cumulative sizes."""
-    ds_idx = bisect.bisect_right(cum, idx)
-    key_idx = idx - (cum[ds_idx - 1] if ds_idx > 0 else 0)
-    return datasets[ds_idx], key_idx
 
 
 class TdDataset(Dataset):
@@ -331,20 +130,20 @@ class TdDataset(Dataset):
         # When no RIR was applied, speech_rev is None and we fall back to clean speech.
         speech_distorted_base = speech_rev if speech_rev is not None else speech
         speech_input = (
-            _apply_aug(self._distortions, speech_distorted_base, self.sr)
+            apply_augmentations(self._distortions, speech_distorted_base, self.sr)
             if self._distortions
             else speech_distorted_base
         )
 
-        speech_out, noise_out, noisy = _mix_audio_signal(
+        speech_out, noise_out, noisy = mix_audio_signal(
             speech, noise, snr, gain, speech_input
         )
 
-        speech_out, noise_out, noisy = _adjust_channels_jointly(
+        speech_out, noise_out, noisy = adjust_channels_jointly(
             self.num_channels, rng, speech_out, noise_out, noisy
         )
 
-        ds, _ = _lookup(self._speech, self._speech_cum, idx % self._speech_cum[-1])
+        ds, _ = lookup(self._speech, self._speech_cum, idx % self._speech_cum[-1])
         return TdSample(
             speech=speech_out,
             noisy=noisy,
@@ -356,7 +155,7 @@ class TdDataset(Dataset):
         )
 
     def _load_speech(self, idx: int, rng: np.random.Generator) -> Tensor:
-        ds, key_idx = _lookup(
+        ds, key_idx = lookup(
             self._speech, self._speech_cum, idx % self._speech_cum[-1]
         )
         min_samples = int(self.max_len_s * self.sr * 1.1) if self.max_len_s else 0
@@ -369,7 +168,7 @@ class TdDataset(Dataset):
                     start = int(rng.integers(0, audio.shape[1] - max_s + 1))
                     audio = audio[:, start : start + max_s]
 
-            audio = _apply_aug(self._speech_aug, audio, self.sr)
+            audio = apply_augmentations(self._speech_aug, audio, self.sr)
 
             if audio.abs().max() > 1e-8:
                 return audio
@@ -378,22 +177,22 @@ class TdDataset(Dataset):
             key_idx = int(rng.integers(0, ds.effective_size))
             audio = torch.from_numpy(ds.get_at_least(key_idx, min_samples, rng))
 
-        return _apply_aug(self._speech_aug, audio, self.sr)
+        return apply_augmentations(self._speech_aug, audio, self.sr)
 
     def _load_noise(self, rng: np.random.Generator) -> Tensor:
         if not self._noise_cum:
             return torch.zeros(1, self.sr)
         flat_idx = int(rng.integers(0, self._noise_cum[-1]))
-        ds, key_idx = _lookup(self._noise, self._noise_cum, flat_idx)
+        ds, key_idx = lookup(self._noise, self._noise_cum, flat_idx)
         audio = torch.from_numpy(ds.get(key_idx, rng))
-        return _apply_aug(self._noise_aug, audio, self.sr)
+        return apply_augmentations(self._noise_aug, audio, self.sr)
 
     def _load_and_combine_noise(
         self, speech_shape: tuple[int, ...], rng: np.random.Generator
     ) -> Tensor:
         n = int(rng.integers(self.n_noises[0], self.n_noises[1] + 1))
         noises = [self._load_noise(rng) for _ in range(n)]
-        return _combine_noises(noises, speech_shape[0], speech_shape[1], rng)
+        return combine_noises(noises, speech_shape[0], speech_shape[1], rng)
 
     def _apply_rir(
         self,
@@ -412,7 +211,7 @@ class TdDataset(Dataset):
             return speech, noise, None
 
         flat_idx = int(rng.integers(0, self._rir_cum[-1]))
-        ds, key_idx = _lookup(self._rir, self._rir_cum, flat_idx)
+        ds, key_idx = lookup(self._rir, self._rir_cum, flat_idx)
         rir_np = ds.get(key_idx, rng)[0]  # first channel, (T,) numpy
         rir_np = (rir_np / (np.sqrt(np.sum(rir_np**2)) + 1e-10)).astype(np.float32)
         rir = torch.from_numpy(rir_np)
@@ -435,10 +234,12 @@ class TdDataset(Dataset):
         speech_rms = float(speech.pow(2).mean().sqrt().item())
 
         # speech_rev: fully reverberant — used as the noisy mixture input
-        speech_rev = _fft_convolve(speech, rir)
-        noise_rev = _fft_convolve(noise, rir)
-        speech_little_rev = _fft_convolve(speech, rir_target)
-        speech_target = self.p_reverb_drr * speech + (1.0 - self.p_reverb_drr) * speech_little_rev
+        speech_rev = fft_convolve(speech, rir)
+        noise_rev = fft_convolve(noise, rir)
+        speech_little_rev = fft_convolve(speech, rir_target)
+        speech_target = (
+            self.p_reverb_drr * speech + (1.0 - self.p_reverb_drr) * speech_little_rev
+        )
 
         # Restore speech to original RMS level
         speech_rms_after = float(speech_target.pow(2).mean().sqrt().item())

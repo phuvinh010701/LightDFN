@@ -69,6 +69,7 @@ class AugmentationConfig:
 
     # [distortion] — speech distortions (time domain + mixing)
     p_reverb: float = 0.1
+    p_reverb_drr: float = 0.3
     p_bandwidth_ext: float = 0.0
     p_clipping: float = 0.0
     p_air_absorption: float = 0.0

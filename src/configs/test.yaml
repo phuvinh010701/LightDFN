@@ -74,6 +74,8 @@ augmentation:
   p_zeroing: 0.
   p_air_absorption: 0.
   p_bandwidth_ext: 0.
+  p_reverb: 0.
+  p_reverb_drr: 0.
 
 data_loader:
   speech_hdf5: ['datasets/hdf5/speech_clean_minisize.hdf5']

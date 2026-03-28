@@ -2,7 +2,6 @@
 
 import bisect
 import logging
-import math
 from dataclasses import dataclass
 
 import h5py
@@ -23,6 +22,9 @@ from src.dataloader.hdf5 import Hdf5Dataset
 from src.types import SplitType
 
 logger = logging.getLogger(__name__)
+
+
+_EPS = 1e-10
 
 
 @dataclass
@@ -84,16 +86,13 @@ def _apply_aug(pipeline: Compose, audio: Tensor, sr: int) -> Tensor:
     Returns a ``(C, T)`` Tensor.
     """
     out = pipeline(audio.unsqueeze(0), sample_rate=sr)  # (1, C, T)
-    result = out.samples if hasattr(out, "samples") else out
-    return result.squeeze(0)  # (C, T)
+    return out.squeeze(0)  # (C, T)
 
 
 def _fft_convolve(signal: Tensor, kernel: Tensor) -> Tensor:
     """FFT convolution of a ``(C, T)`` signal with a 1-D kernel, trimmed to T."""
     out_len = signal.shape[1]
-    n = 1
-    while n < out_len + kernel.shape[0] - 1:
-        n <<= 1
+    n = 1 << (out_len + kernel.shape[0] - 2).bit_length()
     K = torch.fft.rfft(kernel, n=n)  # [n//2+1]
     S = torch.fft.rfft(signal, n=n)  # [C, n//2+1]
     return torch.fft.irfft(S * K, n=n)[:, :out_len]  # [C, out_len]
@@ -105,28 +104,39 @@ def _combine_noises(
     target_length: int,
     rng: np.random.Generator,
 ) -> Tensor:
-    """Combine a list of noise Tensors into one ``(num_channels, target_length)`` Tensor."""
+    """Combine a list of noise tensors into one (num_channels, target_length) tensor."""
     processed: list[Tensor] = []
+
     for noise in noises:
-        if noise.shape[1] == 0:
-            noise = torch.zeros(noise.shape[0], target_length)
-        if noise.shape[1] < target_length:
-            reps = math.ceil(target_length / noise.shape[1])
-            noise = noise.repeat(1, reps)
-        if noise.shape[1] > target_length:
-            excess = noise.shape[1] - target_length
-            start = int(rng.integers(0, excess + 1))
-            noise = noise[:, start : start + target_length]
-        while noise.shape[0] < num_channels:
-            ch = int(rng.integers(0, noise.shape[0]))
-            noise = torch.cat([noise, noise[ch : ch + 1]], dim=0)
-        if noise.shape[0] > num_channels:
-            indices = sorted(
-                rng.choice(noise.shape[0], num_channels, replace=False).tolist()
+        c, t = noise.shape
+
+        if t == 0:
+            noise = torch.zeros(
+                (c, target_length),
+                dtype=noise.dtype,
+                device=noise.device,
             )
-            noise = noise[indices]
+        elif t < target_length:
+            idx = torch.arange(target_length, device=noise.device) % t
+            noise = noise[:, idx]
+        elif t > target_length:
+            start = int(rng.integers(0, t - target_length + 1))
+            noise = noise[:, start : start + target_length]
+
+        c = noise.shape[0]
+
+        if c < num_channels:
+            extra = num_channels - c
+            extra_idx = rng.integers(0, c, size=extra)
+            idx = np.concatenate([np.arange(c), extra_idx])
+            noise = noise[torch.as_tensor(idx, device=noise.device)]
+        elif c > num_channels:
+            idx = np.sort(rng.choice(c, num_channels, replace=False))
+            noise = noise[torch.as_tensor(idx, device=noise.device)]
+
         processed.append(noise)
-    return torch.stack(processed).mean(dim=0)
+
+    return torch.stack(processed, dim=0).mean(dim=0)
 
 
 def _mix_audio_signal(
@@ -141,17 +151,17 @@ def _mix_audio_signal(
     Returns ``(clean_out, noise_out, mixture)``.
     """
     gain_linear = 10.0 ** (gain_db / 20.0)
-    clean_out = clean * gain_linear
+    clean_out: Tensor = clean * gain_linear
     clean_mix = (
         (clean_distorted * gain_linear)
         if clean_distorted is not None
         else clean_out.clone()
     )
 
-    e_clean = float(clean_out.pow(2).sum().item()) + 1e-10
-    e_noise = float(noise.pow(2).sum().item()) + 1e-10
+    e_clean = clean_out.pow(2).sum().clamp(min=_EPS)
+    e_noise = noise.pow(2).sum().clamp(min=_EPS)
     snr_linear = 10.0 ** (snr_db / 10.0)
-    scale = float((1.0 / ((e_noise / e_clean) * snr_linear + 1e-10)) ** 0.5)
+    scale: Tensor = (e_clean / (e_noise * snr_linear)).sqrt()
     noise_out = noise * scale
 
     mixture = clean_mix + noise_out
@@ -161,8 +171,8 @@ def _mix_audio_signal(
         noise_out.abs().max().item(),
         mixture.abs().max().item(),
     )
-    if max_all - 1.0 > 1e-10:
-        sf = 1.0 / (max_all + 1e-10)
+    if max_all - 1.0 > _EPS:
+        sf = 1.0 / (max_all + _EPS)
         clean_out = clean_out * sf
         noise_out = noise_out * sf
         mixture = mixture * sf
@@ -170,19 +180,41 @@ def _mix_audio_signal(
     return clean_out, noise_out, mixture
 
 
-def _adjust_channels(
-    audio: Tensor, num_channels: int, rng: np.random.Generator
-) -> Tensor:
-    """Adjust ``(C, T)`` Tensor to exactly ``num_channels`` channels."""
-    while audio.shape[0] < num_channels:
-        ch = int(rng.integers(0, audio.shape[0]))
-        audio = torch.cat([audio, audio[ch : ch + 1]], dim=0)
-    if audio.shape[0] > num_channels:
-        indices = sorted(
-            rng.choice(audio.shape[0], num_channels, replace=False).tolist()
+def _adjust_channels_jointly(
+    num_channels: int,
+    rng: np.random.Generator,
+    *tensors: Tensor,
+) -> tuple[Tensor, ...]:
+    """Adjust a group of ``(C, T)`` tensors to exactly ``num_channels`` channels.
+
+    All tensors receive the **same** channel indices so that linear relationships
+    (e.g. ``noisy == speech + noise``) are preserved after the adjustment.
+
+    Note:
+        When ``c == num_channels`` the original tensors are returned as-is
+        (no copy).  Callers must not mutate them in place.
+    """
+    c = tensors[0].shape[0]
+
+    if not all(t.shape[0] == c for t in tensors[1:]):
+        raise ValueError(
+            f"all tensors must have the same channel count, "
+            f"got {[t.shape[0] for t in tensors]}"
         )
-        audio = audio[indices]
-    return audio
+
+    if c == num_channels:
+        return tensors
+
+    if c < num_channels:
+        ch_idx = torch.as_tensor(
+            rng.integers(0, c, size=num_channels - c), dtype=torch.long
+        )
+        return tuple(torch.cat([t, t[ch_idx]], dim=0) for t in tensors)
+
+    ch_idx = torch.as_tensor(
+        rng.choice(c, num_channels, replace=False), dtype=torch.long
+    )
+    return tuple(t[ch_idx] for t in tensors)
 
 
 def _lookup(
@@ -250,6 +282,7 @@ class TdDataset(Dataset):
         self.seed = seed
         self.is_train = split == "train"
         self.p_reverb = aug_config.p_reverb
+        self.p_reverb_drr = aug_config.p_reverb_drr
 
         self._speech = self._open(speech_files, max_len_s=max_len_s)
         self._noise = self._open(noise_files)
@@ -307,10 +340,9 @@ class TdDataset(Dataset):
             speech, noise, snr, gain, speech_input
         )
 
-        if speech_out.shape[0] != self.num_channels:
-            speech_out = _adjust_channels(speech_out, self.num_channels, rng)
-            noise_out = _adjust_channels(noise_out, self.num_channels, rng)
-            noisy = _adjust_channels(noisy, self.num_channels, rng)
+        speech_out, noise_out, noisy = _adjust_channels_jointly(
+            self.num_channels, rng, speech_out, noise_out, noisy
+        )
 
         ds, _ = _lookup(self._speech, self._speech_cum, idx % self._speech_cum[-1])
         return TdSample(
@@ -342,6 +374,7 @@ class TdDataset(Dataset):
             if audio.abs().max() > 1e-8:
                 return audio
 
+            logger.warning("Speech augmentation failed, retrying...")
             key_idx = int(rng.integers(0, ds.effective_size))
             audio = torch.from_numpy(ds.get_at_least(key_idx, min_samples, rng))
 
@@ -352,7 +385,7 @@ class TdDataset(Dataset):
             return torch.zeros(1, self.sr)
         flat_idx = int(rng.integers(0, self._noise_cum[-1]))
         ds, key_idx = _lookup(self._noise, self._noise_cum, flat_idx)
-        audio = torch.from_numpy(ds.__getitem__(key_idx, rng=rng))
+        audio = torch.from_numpy(ds.get(key_idx, rng))
         return _apply_aug(self._noise_aug, audio, self.sr)
 
     def _load_and_combine_noise(
@@ -380,7 +413,7 @@ class TdDataset(Dataset):
 
         flat_idx = int(rng.integers(0, self._rir_cum[-1]))
         ds, key_idx = _lookup(self._rir, self._rir_cum, flat_idx)
-        rir_np = ds.__getitem__(key_idx, rng=rng)[0]  # first channel, (T,) numpy
+        rir_np = ds.get(key_idx, rng)[0]  # first channel, (T,) numpy
         rir_np = (rir_np / (np.sqrt(np.sum(rir_np**2)) + 1e-10)).astype(np.float32)
         rir = torch.from_numpy(rir_np)
 
@@ -401,12 +434,11 @@ class TdDataset(Dataset):
 
         speech_rms = float(speech.pow(2).mean().sqrt().item())
 
-        # speech_rev: fully reverberant — used as the noisy mixture input (matches Rust)
+        # speech_rev: fully reverberant — used as the noisy mixture input
         speech_rev = _fft_convolve(speech, rir)
         noise_rev = _fft_convolve(noise, rir)
         speech_little_rev = _fft_convolve(speech, rir_target)
-        drr_f = 0.3  # Fixed DRR matching Rust default (DF_REVERB_DRR=0.3)
-        speech_target = drr_f * speech + (1.0 - drr_f) * speech_little_rev
+        speech_target = self.p_reverb_drr * speech + (1.0 - self.p_reverb_drr) * speech_little_rev
 
         # Restore speech to original RMS level
         speech_rms_after = float(speech_target.pow(2).mean().sqrt().item())
@@ -511,15 +543,16 @@ def _partition(
             logger.warning("Skipping %s: %s", entry.path, exc)
             continue
 
-        if ds_type in ("speech"):
-            speech.append(entry)
-        elif ds_type == "noise":
-            noise.append(entry)
-        elif ds_type == "rir":
-            rir.append(entry)
-        else:
-            logger.warning(
-                "Unknown dataset type '%s' in %s — skipping", ds_type, entry.path
-            )
+        match ds_type:
+            case "speech":
+                speech.append(entry)
+            case "noise":
+                noise.append(entry)
+            case "rir":
+                rir.append(entry)
+            case _:
+                logger.warning(
+                    "Unknown dataset type '%s' in %s — skipping", ds_type, entry.path
+                )
 
     return speech, noise, rir

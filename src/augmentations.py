@@ -1,4 +1,5 @@
 import math
+import random
 from typing import Optional
 
 import torch
@@ -12,113 +13,6 @@ from torch_audiomentations.utils.object_dict import ObjectDict
 
 from src.configs.config import AugmentationConfig
 from src.utils.io import resample
-
-# Biquad coefficient helpers (Audio EQ Cookbook)
-# All return (b, a) as plain Python float lists [b0, b1, b2], [a0=1, a1, a2]
-
-
-def _lowpass_coefs(
-    center_freq: float, q_factor: float, sr: int
-) -> tuple[list[float], list[float]]:
-    """Lowpass biquad coefficients (Audio EQ Cookbook)."""
-    w0 = 2.0 * math.pi * center_freq / sr
-    alpha = math.sin(w0) / (2.0 * q_factor)
-    cos_w0 = math.cos(w0)
-    b0 = (1.0 - cos_w0) / 2.0
-    b1 = 1.0 - cos_w0
-    b2 = b0
-    a0 = 1.0 + alpha
-    a1 = -2.0 * cos_w0
-    a2 = 1.0 - alpha
-    return [b0 / a0, b1 / a0, b2 / a0], [1.0, a1 / a0, a2 / a0]
-
-
-def _highpass_coefs(
-    center_freq: float, q_factor: float, sr: int
-) -> tuple[list[float], list[float]]:
-    """Highpass biquad coefficients (Audio EQ Cookbook)."""
-    w0 = 2.0 * math.pi * center_freq / sr
-    alpha = math.sin(w0) / (2.0 * q_factor)
-    cos_w0 = math.cos(w0)
-    b0 = (1.0 + cos_w0) / 2.0
-    b1 = -(1.0 + cos_w0)
-    b2 = b0
-    a0 = 1.0 + alpha
-    a1 = -2.0 * cos_w0
-    a2 = 1.0 - alpha
-    return [b0 / a0, b1 / a0, b2 / a0], [1.0, a1 / a0, a2 / a0]
-
-
-def _lowshelf_coefs(
-    center_freq: float, q_factor: float, gain_db: float, sr: int
-) -> tuple[list[float], list[float]]:
-    """Lowshelf biquad coefficients (Audio EQ Cookbook)."""
-    w0 = 2.0 * math.pi * center_freq / sr
-    A = 10.0 ** (gain_db / 40.0)
-    alpha = math.sin(w0) / (2.0 * q_factor)
-    cos_w0 = math.cos(w0)
-    S = 2.0 * math.sqrt(A) * alpha
-    b0 = A * ((A + 1.0) - (A - 1.0) * cos_w0 + S)
-    b1 = 2.0 * A * ((A - 1.0) - (A + 1.0) * cos_w0)
-    b2 = A * ((A + 1.0) - (A - 1.0) * cos_w0 - S)
-    a0 = (A + 1.0) + (A - 1.0) * cos_w0 + S
-    a1 = -2.0 * ((A - 1.0) + (A + 1.0) * cos_w0)
-    a2 = (A + 1.0) + (A - 1.0) * cos_w0 - S
-    return [b0 / a0, b1 / a0, b2 / a0], [1.0, a1 / a0, a2 / a0]
-
-
-def _highshelf_coefs(
-    center_freq: float, q_factor: float, gain_db: float, sr: int
-) -> tuple[list[float], list[float]]:
-    """Highshelf biquad coefficients (Audio EQ Cookbook)."""
-    w0 = 2.0 * math.pi * center_freq / sr
-    A = 10.0 ** (gain_db / 40.0)
-    alpha = math.sin(w0) / (2.0 * q_factor)
-    cos_w0 = math.cos(w0)
-    S = 2.0 * math.sqrt(A) * alpha
-    b0 = A * ((A + 1.0) + (A - 1.0) * cos_w0 + S)
-    b1 = -2.0 * A * ((A - 1.0) + (A + 1.0) * cos_w0)
-    b2 = A * ((A + 1.0) + (A - 1.0) * cos_w0 - S)
-    a0 = (A + 1.0) - (A - 1.0) * cos_w0 + S
-    a1 = 2.0 * ((A - 1.0) - (A + 1.0) * cos_w0)
-    a2 = (A + 1.0) - (A - 1.0) * cos_w0 - S
-    return [b0 / a0, b1 / a0, b2 / a0], [1.0, a1 / a0, a2 / a0]
-
-
-def _peaking_eq_coefs(
-    center_freq: float, q_factor: float, gain_db: float, sr: int
-) -> tuple[list[float], list[float]]:
-    """Peaking EQ biquad coefficients (Audio EQ Cookbook)."""
-    w0 = 2.0 * math.pi * center_freq / sr
-    A = 10.0 ** (gain_db / 40.0)
-    alpha = math.sin(w0) / (2.0 * q_factor)
-    cos_w0 = math.cos(w0)
-    b0 = 1.0 + alpha * A
-    b1 = -2.0 * cos_w0
-    b2 = 1.0 - alpha * A
-    a0 = 1.0 + alpha / A
-    a1 = -2.0 * cos_w0
-    a2 = 1.0 - alpha / A
-    return [b0 / a0, b1 / a0, b2 / a0], [1.0, a1 / a0, a2 / a0]
-
-
-def _notch_coefs(
-    center_freq: float, q_factor: float, sr: int
-) -> tuple[list[float], list[float]]:
-    """Notch biquad coefficients (Audio EQ Cookbook)."""
-    w0 = 2.0 * math.pi * center_freq / sr
-    alpha = math.sin(w0) / (2.0 * q_factor)
-    cos_w0 = math.cos(w0)
-    b0 = 1.0
-    b1 = -2.0 * cos_w0
-    b2 = 1.0
-    a0 = 1.0 + alpha
-    a1 = -2.0 * cos_w0
-    a2 = 1.0 - alpha
-    return [b0 / a0, b1 / a0, b2 / a0], [1.0, a1 / a0, a2 / a0]
-
-
-# Augmentation 1: RandRemoveDc
 
 
 class RandRemoveDc(BaseWaveformTransform):
@@ -148,9 +42,6 @@ class RandRemoveDc(BaseWaveformTransform):
             targets=targets,
             target_rate=target_rate,
         )
-
-
-# Augmentation 2: RandLFilt
 
 
 class RandLFilt(BaseWaveformTransform):
@@ -208,8 +99,6 @@ class RandLFilt(BaseWaveformTransform):
             target_rate=target_rate,
         )
 
-
-# Augmentation 3: RandBiquadFilter
 
 _BIQUAD_FILTER_TYPES = [
     "lowpass",
@@ -269,30 +158,26 @@ class RandBiquadFilter(BaseWaveformTransform):
         )
         self.equalize_rms = equalize_rms
 
-    def _sample_coefs(self, sr: int) -> tuple[list[float], list[float]]:
-        """Sample a random filter type and return ``(b, a)`` coefficient lists."""
-        idx = int(torch.randint(0, len(self.filter_types), ()).item())
-        ftype = self.filter_types[idx]
-
+    def _apply_random_filter(self, waveform: Tensor, sr: int) -> Tensor:
+        """Apply one randomly sampled biquad filter stage."""
+        ftype = random.choice(self.filter_types)
         f_low, f_high = _BIQUAD_FREQ_RANGES[ftype]
-        # Log-uniform frequency sampling (matches Rust log_uniform)
-        log_freq = torch.empty(1).uniform_(math.log(f_low), math.log(f_high)).item()
-        center_freq = math.exp(log_freq)
-        q = torch.empty(1).uniform_(self.q_range[0], self.q_range[1]).item()
-        gain_db = torch.empty(1).uniform_(self.gain_range[0], self.gain_range[1]).item()
+        center_freq = math.exp(random.uniform(math.log(f_low), math.log(f_high)))
+        q = random.uniform(self.q_range[0], self.q_range[1])
+        gain_db = random.uniform(self.gain_range[0], self.gain_range[1])
 
         if ftype == "lowpass":
-            return _lowpass_coefs(center_freq, q, sr)
+            return AF.lowpass_biquad(waveform, sr, center_freq, q)
         elif ftype == "highpass":
-            return _highpass_coefs(center_freq, q, sr)
+            return AF.highpass_biquad(waveform, sr, center_freq, q)
         elif ftype == "lowshelf":
-            return _lowshelf_coefs(center_freq, q, gain_db, sr)
+            return AF.bass_biquad(waveform, sr, gain_db, center_freq, q)
         elif ftype == "highshelf":
-            return _highshelf_coefs(center_freq, q, gain_db, sr)
+            return AF.treble_biquad(waveform, sr, gain_db, center_freq, q)
         elif ftype == "peaking_eq":
-            return _peaking_eq_coefs(center_freq, q, gain_db, sr)
+            return AF.equalizer_biquad(waveform, sr, center_freq, gain_db, q)
         else:  # notch
-            return _notch_coefs(center_freq, q, sr)
+            return AF.bandreject_biquad(waveform, sr, center_freq, q)
 
     def apply_transform(
         self,
@@ -306,20 +191,11 @@ class RandBiquadFilter(BaseWaveformTransform):
         out = samples.clone()
 
         for i in range(B):
-            n = int(torch.randint(1, self.n_stages + 1, ()).item())
+            n = random.randint(1, self.n_stages)
             pre_rms = out[i].pow(2).mean().sqrt() if self.equalize_rms else None
 
             for _ in range(n):
-                b_list, a_list = self._sample_coefs(sr)
-                out[i] = AF.biquad(
-                    out[i],
-                    b_list[0],
-                    b_list[1],
-                    b_list[2],
-                    a_list[0],
-                    a_list[1],
-                    a_list[2],
-                )
+                out[i] = self._apply_random_filter(out[i], sr)
 
             if self.equalize_rms and pre_rms is not None:
                 post_rms = out[i].pow(2).mean().sqrt().clamp(min=1e-8)
@@ -336,9 +212,6 @@ class RandBiquadFilter(BaseWaveformTransform):
             targets=targets,
             target_rate=target_rate,
         )
-
-
-# Augmentation 4: RandResample
 
 
 class RandResample(BaseWaveformTransform):
@@ -403,9 +276,6 @@ class RandResample(BaseWaveformTransform):
         )
 
 
-# Augmentation 5: RandClipping
-
-
 class RandClipping(BaseWaveformTransform):
     """Random hard clipping.
 
@@ -454,9 +324,6 @@ class RandClipping(BaseWaveformTransform):
             targets=targets,
             target_rate=target_rate,
         )
-
-
-# Augmentation 6: RandZeroingTD
 
 
 class RandZeroingTD(BaseWaveformTransform):
@@ -523,9 +390,6 @@ class RandZeroingTD(BaseWaveformTransform):
             targets=targets,
             target_rate=target_rate,
         )
-
-
-# Augmentation 7: BandwidthLimiterAugmentation
 
 
 class BandwidthLimiterAugmentation(BaseWaveformTransform):
@@ -597,8 +461,6 @@ class BandwidthLimiterAugmentation(BaseWaveformTransform):
             target_rate=target_rate,
         )
 
-
-# Augmentation 8: AirAbsorptionAugmentation
 
 # ISO 9613-1 air absorption coefficients (×1e-3, units m⁻¹) for 9 frequency bands.
 # 8 scenarios covering different temperature / humidity combinations.
@@ -846,8 +708,6 @@ class RandReverbSim(BaseWaveformTransform):
         )
 
 
-# Augmentation 10: NoiseGenerator (Colored Noise)
-
 # NoiseGenerator is provided directly by torch_audiomentations as AddColoredNoise.
 # It supports the same f_decay range and SNR-based mixing, and is used via the
 # get_noise_generator() factory below.
@@ -859,14 +719,12 @@ NoiseGenerator = AddColoredNoise
 def get_speech_augmentations(
     augmentation_config: AugmentationConfig,
     sample_rate: int = 48000,
-    seed: Optional[int] = None,
 ) -> Compose:
     """Build the speech augmentation pipeline.
 
     Args:
         augmentation_config: Probabilities loaded from YAML config.
         sample_rate: Sample rate in Hz.
-        seed: Ignored — torch handles randomness natively.
 
     Returns:
         ``Compose`` pipeline accepting tensors of shape (B, C, T).
@@ -883,14 +741,12 @@ def get_speech_augmentations(
 def get_noise_augmentations(
     augmentation_config: AugmentationConfig,
     sample_rate: int = 48000,
-    seed: Optional[int] = None,
 ) -> Compose:
     """Build the noise augmentation pipeline.
 
     Args:
         augmentation_config: Probabilities loaded from YAML config.
         sample_rate: Sample rate in Hz.
-        seed: Ignored — torch handles randomness natively.
 
     Returns:
         ``Compose`` pipeline accepting tensors of shape (B, C, T).
@@ -907,14 +763,12 @@ def get_noise_augmentations(
 def get_speech_distortions_td(
     augmentation_config: AugmentationConfig,
     sample_rate: int = 48000,
-    seed: Optional[int] = None,
 ) -> Compose:
     """Build the time-domain speech distortion pipeline.
 
     Args:
         augmentation_config: Probabilities loaded from YAML config.
         sample_rate: Sample rate in Hz.
-        seed: Ignored — torch handles randomness natively.
 
     Returns:
         ``Compose`` pipeline accepting tensors of shape (B, C, T).
@@ -937,7 +791,7 @@ def get_noise_generator(
     f_decay_min: float = -2.0,
     f_decay_max: float = 2.0,
     sample_rate: int = 48000,
-    output_type: str = "dict",
+    output_type: str = "tensor",
 ) -> AddColoredNoise:
     """Return an :class:`AddColoredNoise` instance (legacy compatibility wrapper).
 
@@ -959,7 +813,7 @@ def get_noise_generator(
         max_f_decay=f_decay_max,
         p=p,
         sample_rate=sample_rate,
-        output_type="tensor",
+        output_type=output_type,
     )
 
 

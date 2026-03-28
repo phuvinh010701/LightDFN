@@ -2,7 +2,6 @@ import math
 
 import h5py
 import numpy as np
-from loguru import logger
 
 from src.types import AudioDatasetType
 
@@ -53,12 +52,8 @@ class Hdf5Dataset:
     def __len__(self) -> int:
         return self.effective_size
 
-    def __getitem__(
-        self,
-        idx: int,
-        rng: np.random.Generator = np.random.default_rng(),
-    ) -> np.ndarray:
-        """Return one sample ``(channels, samples)``."""
+    def get(self, idx: int, rng: np.random.Generator) -> np.ndarray:
+        """Return one sample ``(channels, samples)``, cropping with *rng* if needed."""
         key = self.keys[idx % len(self.keys)]
         ds = self._file[f"{self.dataset_type}/{key}"]
         assert isinstance(ds, h5py.Dataset)
@@ -72,18 +67,26 @@ class Hdf5Dataset:
 
         return audio
 
+    def __getitem__(self, idx: int) -> np.ndarray:
+        """Return one sample using a throwaway RNG (use :meth:`get` for reproducibility)."""
+        return self.get(idx, np.random.default_rng())
+
     def get_at_least(
-        self,
-        idx: int,
-        min_samples: int,
-        rng: np.random.Generator = np.random.default_rng(),
+        self, idx: int, min_samples: int, rng: np.random.Generator
     ) -> np.ndarray:
         """Load a sample, tiling it until it has at least ``min_samples`` frames."""
-        audio = self.__getitem__(idx, rng=rng)
+        audio = self.get(idx, rng)
         if audio.shape[1] < min_samples:
             reps = math.ceil(min_samples / audio.shape[1])
             audio = np.tile(audio, (1, reps))
         return audio
+
+    def __getstate__(self) -> dict:
+        state = self.__dict__.copy()
+        # h5py.File cannot safely cross a fork boundary.  Drop the open handle
+        # so each DataLoader worker reopens its own file descriptor on first access.
+        state["_h5file"] = None
+        return state
 
     def close(self) -> None:
         if self._h5file is not None:
@@ -98,12 +101,3 @@ class Hdf5Dataset:
             f"Hdf5Dataset('{self.file_path}', type='{self.dataset_type}', "
             f"keys={len(self.keys)}, effective={self.effective_size}, sr={self.sr})"
         )
-
-
-if __name__ == "__main__":
-    speech_hdf5_path = "datasets/hdf5/speech_clean.hdf5"
-
-    speech_dataset = Hdf5Dataset(speech_hdf5_path)
-    logger.info(speech_dataset)
-    logger.info(speech_dataset[0])
-    assert isinstance(speech_dataset[0], np.ndarray)

@@ -68,6 +68,8 @@ class LightEncoder(nn.Module):
         )
         self.df_conv1 = conv_layer(fstride=2)
         self.erb_bins = config.nb_erb
+        self.nb_spec = config.nb_df   # F dim of feat_spec input (before df_conv1 halving)
+        self.conv_ch = config.conv_ch
         self.emb_in_dim = config.conv_ch * config.nb_erb // 4
         self.emb_dim = config.emb_hidden_dim
         self.emb_out_dim = config.conv_ch * config.nb_erb // 4
@@ -134,7 +136,7 @@ class LightEncoder(nn.Module):
         c1 = self.df_conv1(c0)  # [B, C*2, T, Fc/2]
 
         cemb = c1.permute(0, 2, 3, 1).flatten(2)  # [B, T, -1]
-        cemb = self.df_fc_emb(cemb)  # [T, B, C * F/4]
+        cemb = self.df_fc_emb(cemb)  # [B, T, C * F/4]
         emb = e3.permute(0, 2, 3, 1).flatten(2)  # [B, T, C * F]
         emb = self.combine(emb, cemb)
         emb, _ = self.emb_gru(emb)  # [B, T, -1]
@@ -329,7 +331,6 @@ class LightDfDecoder(nn.Module):
             self.df_n_hidden, out_dim, groups=config.lin_groups
         )
         self.df_out = nn.Sequential(df_out, nn.Tanh())
-        self.df_fc_a = nn.Sequential(nn.Linear(self.df_n_hidden, 1), nn.Sigmoid())
 
     def forward(self, emb: Tensor, c0: Tensor) -> Tensor:
         """Compute per-frequency DF filter coefficients.
@@ -365,7 +366,6 @@ class LightDeepFilteringModule(nn.Module):
         spec:  [B, 1, T, F, 2]
         coefs: [B, O, T, F_df, 2]
         """
-        B, C, T, Freq, _ = spec.shape
         O = self.frame_size
         F_df = self.num_freqs
 
@@ -399,10 +399,9 @@ class LightDeepFilteringModule(nn.Module):
 
         filtered = torch.stack((result_r, result_i), dim=-1)  # [B, 1, T, F_df, 2]
 
-        # Avoid modifying input in-place unless you really want that behavior
-        out = spec.clone()
-        out[:, :, :, :F_df, :] = filtered
-        return out
+        # Concatenate filtered low-freq bins with unmodified high-freq bins.
+        # torch.cat avoids cloning the entire spectrogram just to overwrite part of it.
+        return torch.cat([filtered, spec[:, :, :, F_df:, :]], dim=3)
 
 
 class LightDeepFilterNet(nn.Module):
@@ -484,6 +483,7 @@ class LightDeepFilterNet(nn.Module):
         spec: Tensor,
         feat_erb: Tensor,
         feat_spec: Tensor,
+        atten_lim: Tensor | None = None,
     ) -> tuple[Tensor, Tensor, Tensor, Tensor]:
         """Forward method of DeepFilterNet3 with Li-GRU.
 
@@ -491,6 +491,9 @@ class LightDeepFilterNet(nn.Module):
             spec (Tensor): Spectrum of shape [B, 1, T, F, 2]
             feat_erb (Tensor): ERB features of shape [B, 1, T, E]
             feat_spec (Tensor): Complex spectrogram features of shape [B, 1, T, F', 2]
+            atten_lim (Tensor | None): Per-sample attenuation limit in dB, shape [B].
+                Clamps the ERB mask from below so suppression never exceeds this limit.
+                E.g. 12 dB means at most 12 dB of noise suppression.
 
         Returns:
             spec (Tensor): Enhanced spectrum of shape [B, 1, T, F, 2]
@@ -513,7 +516,6 @@ class LightDeepFilterNet(nn.Module):
             df_coefs = torch.zeros(
                 (b, t, self.nb_df, self.df_order * 2), device=spec.device
             )
-            spec_m = spec.clone()
             emb = emb[:, idcs]
             e0 = e0[:, :, idcs]
             e1 = e1[:, :, idcs]
@@ -524,10 +526,10 @@ class LightDeepFilterNet(nn.Module):
         if self.run_erb:
             if use_lsnr_dropout:
                 m[:, :, idcs] = self.erb_dec(emb, e3, e2, e1, e0)
-                spec_m = self.mask(spec, m)
+                spec_m = self.mask(spec, m, atten_lim)
             else:
                 m = self.erb_dec(emb, e3, e2, e1, e0)
-                spec_m = self.mask(spec, m)
+                spec_m = self.mask(spec, m, atten_lim)
         else:
             m = torch.zeros((), device=spec.device)
             spec_m = torch.zeros_like(spec)
@@ -538,7 +540,7 @@ class LightDeepFilterNet(nn.Module):
             else:
                 df_coefs = self.df_dec(emb, c0)
             df_coefs = self.df_out_transform(df_coefs)
-            spec_e = self.df_op(spec.clone(), df_coefs)
+            spec_e = self.df_op(spec, df_coefs)
             spec_e[..., self.nb_df :, :] = spec_m[..., self.nb_df :, :]
         else:
             df_coefs = torch.zeros((), device=spec.device)
@@ -596,8 +598,8 @@ if __name__ == "__main__":
     device = get_device()
 
     # Random inputs
-    B, T, F = 1, 10, 481
-    spec = torch.randn(B, 1, T, F, 2, device=device)
+    B, T, n_freq = 1, 10, 481
+    spec = torch.randn(B, 1, T, n_freq, 2, device=device)
     feat_erb = torch.randn(B, 1, T, 32, device=device)
     feat_spec = torch.randn(B, 1, T, 96, 2, device=device)
 

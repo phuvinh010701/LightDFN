@@ -850,7 +850,7 @@ if __name__ == "__main__":
         axes[0, 0].set_ylabel("Amplitude")
 
         axes[0, 1].plot(t.numpy(), aug_np, linewidth=0.5, color="tab:orange")
-        axes[0, 1].set_title(f"Augmented — waveform")
+        axes[0, 1].set_title("Augmented — waveform")
         axes[0, 1].set_xlabel("Time (s)")
         axes[0, 1].set_ylabel("Amplitude")
 
@@ -884,7 +884,6 @@ if __name__ == "__main__":
         plt.close(fig)
         logger.info(f"    plot → {save_path}")
 
-
     AUGMENTATION_CASES: list[tuple[str, BaseWaveformTransform]] = [
         ("RandRemoveDc", RandRemoveDc(p=1.0, sample_rate=TARGET_SR)),
         ("RandLFilt", RandLFilt(p=1.0)),
@@ -892,8 +891,14 @@ if __name__ == "__main__":
         ("RandResample", RandResample(p=1.0, sample_rate=TARGET_SR)),
         ("RandClipping", RandClipping(p=1.0)),
         ("RandZeroingTD", RandZeroingTD(p=1.0)),
-        ("BandwidthLimiterAugmentation", BandwidthLimiterAugmentation(p=1.0, sample_rate=TARGET_SR)),
-        ("AirAbsorptionAugmentation", AirAbsorptionAugmentation(p=1.0, sample_rate=TARGET_SR)),
+        (
+            "BandwidthLimiterAugmentation",
+            BandwidthLimiterAugmentation(p=1.0, sample_rate=TARGET_SR),
+        ),
+        (
+            "AirAbsorptionAugmentation",
+            AirAbsorptionAugmentation(p=1.0, sample_rate=TARGET_SR),
+        ),
         ("RandReverbSim", RandReverbSim(p=1.0, sample_rate=TARGET_SR)),
         ("NoiseGenerator", NoiseGenerator(p=1.0, sample_rate=TARGET_SR)),
     ]
@@ -921,7 +926,11 @@ if __name__ == "__main__":
             try:
                 batch = wav.unsqueeze(0)  # (1, C, T)
                 result = aug(batch, sample_rate=sr)
-                aug_wav = result.samples.squeeze(0) if hasattr(result, "samples") else result.squeeze(0)
+                aug_wav = (
+                    result.samples.squeeze(0)
+                    if hasattr(result, "samples")
+                    else result.squeeze(0)
+                )
 
                 out_wav = OUT_DIR / f"{stem}__{aug_name}.wav"
                 torchaudio.save(str(out_wav), aug_wav, sr)
@@ -939,7 +948,11 @@ if __name__ == "__main__":
             try:
                 batch = wav.unsqueeze(0)
                 result = pipeline(batch, sample_rate=sr)
-                aug_wav = result.samples.squeeze(0) if hasattr(result, "samples") else result.squeeze(0)
+                aug_wav = (
+                    result.samples.squeeze(0)
+                    if hasattr(result, "samples")
+                    else result.squeeze(0)
+                )
 
                 out_wav = OUT_DIR / f"{stem}__{pipe_name}.wav"
                 torchaudio.save(str(out_wav), aug_wav, sr)

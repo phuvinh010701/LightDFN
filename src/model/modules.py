@@ -211,7 +211,9 @@ class Mask(nn.Module):
         self.register_buffer("erb_inv_fb", erb_inv_fb)
         self.eps = eps
 
-    def forward(self, spec: Tensor, mask: Tensor, atten_lim: Optional[Tensor] = None) -> Tensor:
+    def forward(
+        self, spec: Tensor, mask: Tensor, atten_lim: Optional[Tensor] = None
+    ) -> Tensor:
         # spec (real) [B, 1, T, F, 2], F: freq_bins
         # mask (real): [B, 1, T, Fe], Fe: erb_bins
         # atten_lim: [B] — per-sample attenuation limit in dB (optional)
@@ -648,8 +650,12 @@ class LiGRU(nn.Module):
             h_last = h_last.reshape(
                 h_last.shape[0] * 2, h_last.shape[1], self.hidden_size
             )
-        else:
-            h_last = h_last.transpose(0, 1)
+        # else:
+        #     h_last = h_last.transpose(0, 1)
+        # h_last shape is [num_layers, B, H] — kept as-is so that the shape
+        # matches the init_states convention used by StreamingLightDFN and the
+        # ONNX streaming export.  Transposing to [B, L, H] would break the
+        # state-threading loop in the streaming inference script.
 
         return x, h_last
 

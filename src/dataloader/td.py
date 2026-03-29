@@ -1,6 +1,5 @@
 """Time-domain dataset: loads speech/noise/RIR from HDF5 and mixes them."""
 
-import bisect
 import logging
 
 import h5py
@@ -19,7 +18,12 @@ from src.configs.config import AugmentationConfig
 from src.dataloader.dataset_config import DatasetConfig, DatasetEntry
 from src.dataloader.hdf5 import Hdf5Dataset
 from src.types import SplitType, TdSample
-from src.utils.audio import adjust_channels_jointly, combine_noises, fft_convolve, mix_audio_signal
+from src.utils.audio import (
+    adjust_channels_jointly,
+    combine_noises,
+    fft_convolve,
+    mix_audio_signal,
+)
 from src.utils.dataloader import lookup
 
 logger = logging.getLogger(__name__)
@@ -155,9 +159,7 @@ class TdDataset(Dataset):
         )
 
     def _load_speech(self, idx: int, rng: np.random.Generator) -> Tensor:
-        ds, key_idx = lookup(
-            self._speech, self._speech_cum, idx % self._speech_cum[-1]
-        )
+        ds, key_idx = lookup(self._speech, self._speech_cum, idx % self._speech_cum[-1])
         min_samples = int(self.max_len_s * self.sr * 1.1) if self.max_len_s else 0
         audio = torch.from_numpy(ds.get_at_least(key_idx, min_samples, rng))
 

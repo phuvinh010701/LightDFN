@@ -44,7 +44,9 @@ def _non_pad_sequential(seq: nn.Sequential) -> nn.Sequential:
     Called once at init to pre-cache the layers used in ``_conv_with_buf``,
     avoiding an ``isinstance`` check on every streaming frame.
     """
-    return nn.Sequential(*[layer for layer in seq if not isinstance(layer, nn.ConstantPad2d)])
+    return nn.Sequential(
+        *[layer for layer in seq if not isinstance(layer, nn.ConstantPad2d)]
+    )
 
 
 def _conv_with_buf(
@@ -189,16 +191,16 @@ class StreamingLightDFN(nn.Module):
         # Align df_coefs [B, O, T, F_df, 2] → [B, 1, T, F_df, O, 2] to match spec_f.
         # permute is a view (zero-copy); element-wise ops replace the 4 einsum calls.
         df_coefs_aligned = df_coefs.permute(0, 2, 3, 1, 4).unsqueeze(1)
-        sr, si = spec_f[..., 0], spec_f[..., 1]           # [B, 1, T, F_df, O]
+        sr, si = spec_f[..., 0], spec_f[..., 1]  # [B, 1, T, F_df, O]
         cr, ci = df_coefs_aligned[..., 0], df_coefs_aligned[..., 1]
-        result_r = (sr * cr - si * ci).sum(-1)             # [B, 1, T, F_df]
+        result_r = (sr * cr - si * ci).sum(-1)  # [B, 1, T, F_df]
         result_i = (sr * ci + si * cr).sum(-1)
 
         # Avoid in-place index assignments (not supported by TorchScript ONNX exporter).
         # Concatenate the DF-filtered low bands with the ERB-masked high bands.
         df_out = torch.stack([result_r, result_i], dim=-1)  # [B, 1, 1, nb_df, 2]
-        erb_out = spec_m[..., m.nb_df :, :]                 # [B, 1, 1, F-nb_df, 2]
-        spec_e = torch.cat([df_out, erb_out], dim=-2)        # [B, 1, 1, F, 2]
+        erb_out = spec_m[..., m.nb_df :, :]  # [B, 1, 1, F-nb_df, 2]
+        spec_e = torch.cat([df_out, erb_out], dim=-2)  # [B, 1, 1, F, 2]
 
         # Attenuation limit: mix noisy + enhanced so suppression never exceeds atten_lim_db.
         if atten_lim_db is not None and abs(atten_lim_db) > 0:
@@ -238,7 +240,7 @@ class StreamingLightDFN(nn.Module):
         h_df = _z(df_layers, batch_size, df_dim)
 
         nb_erb = self.model.enc.erb_bins
-        nb_spec = self.model.enc.nb_spec   # F dim of feat_spec input (= config.nb_df)
+        nb_spec = self.model.enc.nb_spec  # F dim of feat_spec input (= config.nb_df)
         conv_ch = self.model.enc.conv_ch
 
         # erb_conv0: in_ch=1, kt=3 → buf [B, 1, 2, nb_erb]

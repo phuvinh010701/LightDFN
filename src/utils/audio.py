@@ -87,7 +87,6 @@ def combine_noises(
     return torch.stack(processed, dim=0).mean(dim=0)
 
 
-
 def adjust_channels_jointly(
     num_channels: int,
     rng: np.random.Generator,
@@ -161,9 +160,8 @@ def compute_stft(audio: Tensor, fft_size: int, hop_size: int, window: Tensor) ->
     out = out.view(B, C, F_bins, T_frames).permute(0, 1, 3, 2)
     return torch.view_as_real(out.contiguous())
 
-def spec_to_audio(
-    spec: Tensor, fft_size: int, hop_size: int, window: Tensor
-) -> Tensor:
+
+def spec_to_audio(spec: Tensor, fft_size: int, hop_size: int, window: Tensor) -> Tensor:
     """Reconstruct waveform from a complex spectrogram tensor.
 
     Args:

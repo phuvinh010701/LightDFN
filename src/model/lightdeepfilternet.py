@@ -68,7 +68,9 @@ class LightEncoder(nn.Module):
         )
         self.df_conv1 = conv_layer(fstride=2)
         self.erb_bins = config.nb_erb
-        self.nb_spec = config.nb_df   # F dim of feat_spec input (before df_conv1 halving)
+        self.nb_spec = (
+            config.nb_df
+        )  # F dim of feat_spec input (before df_conv1 halving)
         self.conv_ch = config.conv_ch
         self.emb_in_dim = config.conv_ch * config.nb_erb // 4
         self.emb_dim = config.emb_hidden_dim
@@ -375,9 +377,14 @@ class LightDeepFilteringModule(nn.Module):
                 spec, [0, 0, 0, 0, self._pad_before, self._pad_after]
             )  # [B, 1, T+pad, F, 2]
 
-            # unfold gives [B, 1, T, F, 2, O]
-            spec_win = spec_padded.unfold(2, O, 1).movedim(-1, -2)
-            # -> [B, 1, T, F, O, 2]
+            # Replace unfold (unsupported by TorchScript ONNX exporter when the
+            # input size is not statically accessible) with explicit slice stacking.
+            # range(O) is a static Python range so the loop is unrolled at trace
+            # time, producing O plain Slice ops instead of a dynamic Unfold.
+            T = spec.shape[2]
+            spec_win = torch.stack(
+                [spec_padded[:, :, i : i + T, :, :] for i in range(O)], dim=4
+            )  # [B, 1, T, F, O, 2]
         else:
             spec_win = spec.unsqueeze(-2)  # [B, 1, T, F, 1, 2]
 
@@ -541,7 +548,12 @@ class LightDeepFilterNet(nn.Module):
                 df_coefs = self.df_dec(emb, c0)
             df_coefs = self.df_out_transform(df_coefs)
             spec_e = self.df_op(spec, df_coefs)
-            spec_e[..., self.nb_df :, :] = spec_m[..., self.nb_df :, :]
+            # Replace in-place index assignment (creates onnx::Placeholder /
+            # index_put_ which is not supported by the TorchScript ONNX exporter)
+            # with a functional torch.cat over the frequency axis.
+            spec_e = torch.cat(
+                [spec_e[..., : self.nb_df, :], spec_m[..., self.nb_df :, :]], dim=-2
+            )
         else:
             df_coefs = torch.zeros((), device=spec.device)
             spec_e = spec_m

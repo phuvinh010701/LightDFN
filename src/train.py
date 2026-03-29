@@ -20,39 +20,12 @@ from src.configs.config import LossConfig, ModelConfig, TrainConfig, load_config
 from src.dataloader.loader import DataLoaderBuilder, DeepFilterNetDataLoader, DsBatch
 from src.losses.loss import Loss
 from src.model.lightdeepfilternet import init_model
+from src.utils.audio import compute_stft, spec_to_audio, spectrogram_to_db
 from src.utils.erb import get_erb_filterbanks
 from src.utils.io import get_device
 from src.utils.utils import count_parameters
 
 matplotlib.use("Agg")  # Non-interactive backend for server-side rendering
-
-
-def compute_stft(audio: Tensor, fft_size: int, hop_size: int, window: Tensor) -> Tensor:
-    """STFT consistent with FftDataset (center=False, hann window).
-
-    Args:
-        audio (Tensor): Input waveform of shape ``[B, C, T_samples]``.
-        fft_size (int): FFT size.
-        hop_size (int): Hop size between frames.
-        window (Tensor): Analysis window of length ``fft_size``.
-
-    Returns:
-        Tensor: Real-valued STFT output of shape ``[B, C, T_frames, F, 2]``.
-    """
-    B, C, T = audio.shape
-    out = torch.stft(
-        audio.reshape(B * C, T),
-        n_fft=fft_size,
-        hop_length=hop_size,
-        win_length=fft_size,
-        window=window,
-        return_complex=True,
-        center=False,
-    )
-    # out: [B*C, F, T_frames] → [B, C, T_frames, F, 2]
-    F_bins, T_frames = out.shape[-2], out.shape[-1]
-    out = out.view(B, C, F_bins, T_frames).permute(0, 1, 3, 2)
-    return torch.view_as_real(out.contiguous())
 
 
 def prepare_batch(
@@ -207,54 +180,6 @@ def run_epoch(
     return avg_loss, avg_summaries
 
 
-def _spec_to_audio(
-    spec: Tensor, fft_size: int, hop_size: int, window: Tensor
-) -> Tensor:
-    """Reconstruct waveform from a complex spectrogram tensor.
-
-    Args:
-        spec: Shape ``[B, 1, T_frames, F, 2]`` real-valued (real/imag).
-        fft_size: FFT size.
-        hop_size: Hop size.
-        window: Analysis/synthesis window of length ``fft_size``.
-
-    Returns:
-        Waveform of shape ``[B, T_samples]``.
-    """
-    # [B, 1, T, F, 2] → complex [B, 1, T, F] → [B, F, T]
-    spec_c = torch.view_as_complex(spec[:, 0].contiguous())  # [B, T, F]
-    spec_c = spec_c.permute(0, 2, 1)  # [B, F, T]
-    B = spec_c.shape[0]
-    audio = torch.istft(
-        spec_c.reshape(B, spec_c.shape[-2], spec_c.shape[-1]),
-        n_fft=fft_size,
-        hop_length=hop_size,
-        win_length=fft_size,
-        window=window,
-        center=True,
-    )  # [B, T_samples]
-    return audio
-
-
-def _spectrogram_to_db(spec: Tensor, ref_db: float = 80.0) -> np.ndarray:
-    """Convert a complex spectrogram tensor to a dB magnitude array.
-
-    Args:
-        spec: Shape ``[1, T_frames, F, 2]`` or ``[T_frames, F, 2]``.
-        ref_db: Dynamic range in dB to clip at.
-
-    Returns:
-        Array of shape ``[F, T_frames]`` with values in ``[-ref_db, 0]`` dB.
-    """
-    if spec.dim() == 4:
-        spec = spec[0]  # [T, F, 2]
-    mag = torch.view_as_complex(spec.contiguous()).abs()  # [T, F]
-    mag_db = 20.0 * torch.log10(mag + 1e-8)
-    mag_db = mag_db - mag_db.max()
-    mag_db = mag_db.clamp(min=-ref_db)
-    return mag_db.T.cpu().numpy()  # [F, T]
-
-
 def _make_spectrogram_figure(
     noisy: Tensor,
     clean: Tensor,
@@ -287,7 +212,7 @@ def _make_spectrogram_figure(
     freq_max = sr / 2 / 1000  # kHz
 
     for ax, title, spec in zip(axes, titles, specs):
-        db = _spectrogram_to_db(spec)  # [F, T]
+        db = spectrogram_to_db(spec)  # [F, T]
         ax.imshow(
             db,
             origin="lower",
@@ -362,13 +287,13 @@ def eval_audio_samples(
                 plt.close(fig)
 
                 # --- Audio clips ---
-                noisy_wav = _spec_to_audio(
+                noisy_wav = spec_to_audio(
                     spec_noisy[i : i + 1, :1], fft_size, hop_size, window
                 ).squeeze()
-                clean_wav = _spec_to_audio(
+                clean_wav = spec_to_audio(
                     spec_clean[i : i + 1, :1], fft_size, hop_size, window
                 ).squeeze()
-                enh_wav = _spec_to_audio(
+                enh_wav = spec_to_audio(
                     enhanced[i : i + 1, :1], fft_size, hop_size, window
                 ).squeeze()
 

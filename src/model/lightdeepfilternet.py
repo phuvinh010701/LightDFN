@@ -7,6 +7,7 @@ based on DeepFilterNet3 that replaces all GRU layers with Li-GRU layers for impr
 from functools import partial
 
 import torch
+import torch.nn.functional as F
 from loguru import logger
 from torch import Tensor, nn
 from typing_extensions import Final
@@ -67,6 +68,10 @@ class LightEncoder(nn.Module):
         )
         self.df_conv1 = conv_layer(fstride=2)
         self.erb_bins = config.nb_erb
+        self.nb_spec = (
+            config.nb_df
+        )  # F dim of feat_spec input (before df_conv1 halving)
+        self.conv_ch = config.conv_ch
         self.emb_in_dim = config.conv_ch * config.nb_erb // 4
         self.emb_dim = config.emb_hidden_dim
         self.emb_out_dim = config.conv_ch * config.nb_erb // 4
@@ -133,7 +138,7 @@ class LightEncoder(nn.Module):
         c1 = self.df_conv1(c0)  # [B, C*2, T, Fc/2]
 
         cemb = c1.permute(0, 2, 3, 1).flatten(2)  # [B, T, -1]
-        cemb = self.df_fc_emb(cemb)  # [T, B, C * F/4]
+        cemb = self.df_fc_emb(cemb)  # [B, T, C * F/4]
         emb = e3.permute(0, 2, 3, 1).flatten(2)  # [B, T, C * F]
         emb = self.combine(emb, cemb)
         emb, _ = self.emb_gru(emb)  # [B, T, -1]
@@ -328,7 +333,6 @@ class LightDfDecoder(nn.Module):
             self.df_n_hidden, out_dim, groups=config.lin_groups
         )
         self.df_out = nn.Sequential(df_out, nn.Tanh())
-        self.df_fc_a = nn.Sequential(nn.Linear(self.df_n_hidden, 1), nn.Sigmoid())
 
     def forward(self, emb: Tensor, c0: Tensor) -> Tensor:
         """Compute per-frequency DF filter coefficients.
@@ -351,64 +355,60 @@ class LightDfDecoder(nn.Module):
 
 
 class LightDeepFilteringModule(nn.Module):
-    """Optimized deep filtering using unfold + einsum.
-
-    Args:
-        num_freqs (int): Number of frequency bins to filter (``nb_df``).
-        frame_size (int): Multi-frame filter order.
-        lookahead (int): Number of future frames visible to the filter.
-    """
-
     def __init__(self, num_freqs: int, frame_size: int, lookahead: int = 0) -> None:
-        """Initialise LightDeepFilteringModule."""
         super().__init__()
         self.num_freqs = num_freqs
         self.frame_size = frame_size
         self.lookahead = lookahead
-        self.pad = nn.ConstantPad2d((0, 0, frame_size - 1 - lookahead, lookahead), 0.0)
+        self._pad_before = frame_size - 1 - lookahead
+        self._pad_after = lookahead
 
     def forward(self, spec: Tensor, coefs: Tensor) -> Tensor:
-        """Apply deep filtering coefficients to spectrogram.
-
-        Args:
-            spec: Complex spectrogram [B, 1, T, F, 2] where F is total frequency bins
-            coefs: Filter coefficients [B, O, T, F_df, 2] where F_df is DF bins (subset)
-
-        Returns:
-            Filtered spectrogram [B, 1, T, F_df, 2] - only processes DF bins
         """
-        # Convert to complex for efficient operations
-        spec_complex = torch.view_as_complex(spec)  # [B, 1, T, F]
-        coefs_complex = torch.view_as_complex(coefs)  # [B, O, T, F_df]
+        spec:  [B, 1, T, F, 2]
+        coefs: [B, O, T, F_df, 2]
+        """
+        O = self.frame_size
+        F_df = self.num_freqs
 
-        # Apply padding and unfold to get overlapping frames
-        # spec_complex: [B, 1, T, F] -> pad -> [B, 1, T+pad, F] -> unfold -> [B, 1, T, F, O]
-        if self.frame_size > 1:
-            spec_padded = self.pad(spec_complex)
-            spec_unfolded = spec_padded.unfold(2, self.frame_size, 1)  # [B, 1, T, F, O]
+        # Build temporal window: [B, 1, T, F, O, 2]
+        if O > 1:
+            spec_padded = F.pad(
+                spec, [0, 0, 0, 0, self._pad_before, self._pad_after]
+            )  # [B, 1, T+pad, F, 2]
+
+            # Replace unfold (unsupported by TorchScript ONNX exporter when the
+            # input size is not statically accessible) with explicit slice stacking.
+            # range(O) is a static Python range so the loop is unrolled at trace
+            # time, producing O plain Slice ops instead of a dynamic Unfold.
+            T = spec.shape[2]
+            spec_win = torch.stack(
+                [spec_padded[:, :, i : i + T, :, :] for i in range(O)], dim=4
+            )  # [B, 1, T, F, O, 2]
         else:
-            spec_unfolded = spec_complex.unsqueeze(-1)  # [B, 1, T, F, 1]
+            spec_win = spec.unsqueeze(-2)  # [B, 1, T, F, 1, 2]
 
-        # Extract only DF bins
-        spec_f = spec_unfolded.narrow(-2, 0, self.num_freqs)  # [B, 1, T, F_df, O]
+        # Only DF bins
+        spec_win = spec_win[:, :, :, :F_df, :, :]  # [B, 1, T, F_df, O, 2]
 
-        # Reshape coefs: [B, O, T, F_df] -> [B, 1, O, T, F_df]
-        coefs_reshaped = coefs_complex.view(
-            coefs_complex.shape[0],
-            -1,
-            self.frame_size,
-            coefs_complex.shape[2],
-            coefs_complex.shape[3],
-        )  # [B, 1, O, T, F_df]
+        # Reorder coefs to match spec layout: [B, 1, T, F_df, O, 2]
+        coefs = coefs.permute(0, 2, 3, 1, 4).unsqueeze(1)
 
-        # Apply deep filtering using einsum
-        # spec_f: [B, 1, T, F_df, O]
-        # coefs_reshaped: [B, 1, O, T, F_df]
-        # Result: [B, 1, T, F_df]
-        spec_filtered = torch.einsum("...tfn,...ntf->...tf", spec_f, coefs_reshaped)
+        # Real/imag parts
+        sr = spec_win[..., 0]
+        si = spec_win[..., 1]
+        cr = coefs[..., 0]
+        ci = coefs[..., 1]
 
-        spec[..., : self.num_freqs, :] = torch.view_as_real(spec_filtered)
-        return spec
+        # Complex multiply + sum over frame axis O
+        result_r = (sr * cr - si * ci).sum(dim=-1)  # [B, 1, T, F_df]
+        result_i = (sr * ci + si * cr).sum(dim=-1)  # [B, 1, T, F_df]
+
+        filtered = torch.stack((result_r, result_i), dim=-1)  # [B, 1, T, F_df, 2]
+
+        # Concatenate filtered low-freq bins with unmodified high-freq bins.
+        # torch.cat avoids cloning the entire spectrogram just to overwrite part of it.
+        return torch.cat([filtered, spec[:, :, :, F_df:, :]], dim=3)
 
 
 class LightDeepFilterNet(nn.Module):
@@ -490,6 +490,7 @@ class LightDeepFilterNet(nn.Module):
         spec: Tensor,
         feat_erb: Tensor,
         feat_spec: Tensor,
+        atten_lim: Tensor | None = None,
     ) -> tuple[Tensor, Tensor, Tensor, Tensor]:
         """Forward method of DeepFilterNet3 with Li-GRU.
 
@@ -497,6 +498,9 @@ class LightDeepFilterNet(nn.Module):
             spec (Tensor): Spectrum of shape [B, 1, T, F, 2]
             feat_erb (Tensor): ERB features of shape [B, 1, T, E]
             feat_spec (Tensor): Complex spectrogram features of shape [B, 1, T, F', 2]
+            atten_lim (Tensor | None): Per-sample attenuation limit in dB, shape [B].
+                Clamps the ERB mask from below so suppression never exceeds this limit.
+                E.g. 12 dB means at most 12 dB of noise suppression.
 
         Returns:
             spec (Tensor): Enhanced spectrum of shape [B, 1, T, F, 2]
@@ -519,7 +523,6 @@ class LightDeepFilterNet(nn.Module):
             df_coefs = torch.zeros(
                 (b, t, self.nb_df, self.df_order * 2), device=spec.device
             )
-            spec_m = spec.clone()
             emb = emb[:, idcs]
             e0 = e0[:, :, idcs]
             e1 = e1[:, :, idcs]
@@ -530,10 +533,10 @@ class LightDeepFilterNet(nn.Module):
         if self.run_erb:
             if use_lsnr_dropout:
                 m[:, :, idcs] = self.erb_dec(emb, e3, e2, e1, e0)
-                spec_m = self.mask(spec, m)
+                spec_m = self.mask(spec, m, atten_lim)
             else:
                 m = self.erb_dec(emb, e3, e2, e1, e0)
-                spec_m = self.mask(spec, m)
+                spec_m = self.mask(spec, m, atten_lim)
         else:
             m = torch.zeros((), device=spec.device)
             spec_m = torch.zeros_like(spec)
@@ -544,8 +547,13 @@ class LightDeepFilterNet(nn.Module):
             else:
                 df_coefs = self.df_dec(emb, c0)
             df_coefs = self.df_out_transform(df_coefs)
-            spec_e = self.df_op(spec.clone(), df_coefs)
-            spec_e[..., self.nb_df :, :] = spec_m[..., self.nb_df :, :]
+            spec_e = self.df_op(spec, df_coefs)
+            # Replace in-place index assignment (creates onnx::Placeholder /
+            # index_put_ which is not supported by the TorchScript ONNX exporter)
+            # with a functional torch.cat over the frequency axis.
+            spec_e = torch.cat(
+                [spec_e[..., : self.nb_df, :], spec_m[..., self.nb_df :, :]], dim=-2
+            )
         else:
             df_coefs = torch.zeros((), device=spec.device)
             spec_e = spec_m
@@ -602,8 +610,8 @@ if __name__ == "__main__":
     device = get_device()
 
     # Random inputs
-    B, T, F = 1, 10, 481
-    spec = torch.randn(B, 1, T, F, 2, device=device)
+    B, T, n_freq = 1, 10, 481
+    spec = torch.randn(B, 1, T, n_freq, 2, device=device)
     feat_erb = torch.randn(B, 1, T, 32, device=device)
     feat_spec = torch.randn(B, 1, T, 96, 2, device=device)
 

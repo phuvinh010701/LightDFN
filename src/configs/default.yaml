@@ -43,6 +43,7 @@ augmentation:
   p_noise_clipping: 0.15
   p_noise_biquad: 0.40
   p_reverb: 0.1
+  p_reverb_drr: 0.3
   p_bandwidth_ext: 0.0
   p_clipping: 0.0
   p_air_absorption: 0.0
@@ -63,7 +64,7 @@ data_loader:
   max_len_s: 3.0
   batch_size: 32
   batch_size_eval: 32
-  num_workers: 4
+  num_workers: 8
   num_prefetch_batches: 8
   seed: 43
   dataloader_snrs: [-100, -5, 0, 5, 10, 20, 40]

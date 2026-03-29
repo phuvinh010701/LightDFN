@@ -12,8 +12,6 @@ Each entry is ``[filename, sampling_factor]``.  A sampling factor > 1
 oversamples that file; < 1 undersamples it.
 """
 
-from __future__ import annotations
-
 import json
 from dataclasses import dataclass
 from pathlib import Path

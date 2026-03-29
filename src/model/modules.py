@@ -211,9 +211,16 @@ class Mask(nn.Module):
         self.register_buffer("erb_inv_fb", erb_inv_fb)
         self.eps = eps
 
-    def forward(self, spec: Tensor, mask: Tensor) -> Tensor:
+    def forward(
+        self, spec: Tensor, mask: Tensor, atten_lim: Optional[Tensor] = None
+    ) -> Tensor:
         # spec (real) [B, 1, T, F, 2], F: freq_bins
         # mask (real): [B, 1, T, Fe], Fe: erb_bins
+        # atten_lim: [B] — per-sample attenuation limit in dB (optional)
+        if atten_lim is not None:
+            # Convert dB to linear amplitude and clamp mask from below
+            lim = 10 ** (-atten_lim / 20)
+            mask = mask.clamp(min=lim.view(-1, 1, 1, 1))
         mask = mask.matmul(self.erb_inv_fb)  # [B, 1, T, F]
         if not spec.is_complex():
             mask = mask.unsqueeze(4)
@@ -294,6 +301,43 @@ class SqueezedLiGRU_S(nn.Module):
         return x, h_out
 
 
+@torch.jit.script
+def _ligru_cell_relu(
+    w: Tensor,
+    u_weight: Tensor,
+    drop_mask: Tensor,
+    ht: Tensor,
+) -> Tensor:
+    """JIT-compiled LiGRU cell loop for ReLU activation.
+
+    Compiles the recurrent time-step loop to C++, eliminating Python dispatch
+    overhead (~300 iterations for a 3 s clip at 48 kHz / hop 480).
+
+    Uses list + stack instead of pre-allocated tensor with index_put_ so the
+    ONNX TorchScript exporter can convert the loop body to ONNX SequenceInsert /
+    ConcatFromSequence ops (opset >= 11) without hitting unsupported index_put_.
+
+    Args:
+        w:         Pre-computed input projection ``W * x``, shape ``[B, T, 2H]``.
+        u_weight:  Recurrent weight matrix of shape ``[2H, H]``.
+        drop_mask: Dropout mask broadcast-compatible with ``[B, H]``.
+        ht:        Initial hidden state, shape ``[B, H]`` (or ``[1, H]`` to broadcast).
+
+    Returns:
+        Full hidden-state sequence of shape ``[B, T, H]``.
+    """
+    u_t = u_weight.t()  # pre-transpose once outside the loop
+    out: list[Tensor] = []
+    for k in range(w.shape[1]):
+        gates = w[:, k] + ht @ u_t
+        at, zt = gates.chunk(2, 1)
+        zt = torch.sigmoid(zt)
+        hcand = torch.relu(at) * drop_mask
+        ht = zt * ht + (1 - zt) * hcand
+        out.append(ht)
+    return torch.stack(out, dim=1)
+
+
 class LiGRU_Layer(nn.Module):
     """This function implements Light-Gated Recurrent Units (ligru) layer.
 
@@ -337,6 +381,7 @@ class LiGRU_Layer(nn.Module):
         self.batch_size = batch_size
         self.bidirectional = bidirectional
         self.dropout = dropout
+        self.nonlinearity = nonlinearity
 
         self.w = nn.Linear(self.input_size, 2 * self.hidden_size, bias=False)
 
@@ -356,16 +401,16 @@ class LiGRU_Layer(nn.Module):
             self.norm = torch.nn.LayerNorm(2 * self.hidden_size)
             self.normalize = True
         else:
-            # Normalization is disabled here. self.norm is only  formally
+            # Normalization is disabled here. self.norm is only formally
             # initialized to avoid jit issues.
             self.norm = torch.nn.LayerNorm(2 * self.hidden_size)
-            self.normalize = True
+            self.normalize = False
 
         # Initial state
         self.register_buffer("h_init", torch.zeros(1, self.hidden_size))
 
         # Preloading dropout masks (gives some speed improvement)
-        self._init_drop(self.batch_size)
+        self._init_drop()
 
         # Setting the activation function
         if nonlinearity == "tanh":
@@ -397,8 +442,8 @@ class LiGRU_Layer(nn.Module):
 
         # Apply batch normalization
         if self.normalize:
-            w_bn = self.norm(w.reshape(w.shape[0] * w.shape[1], w.shape[2]))
-            w = w_bn.reshape(w.shape[0], w.shape[1], w.shape[2])
+            B, T, H2 = w.shape
+            w = self.norm(w.view(B * T, H2)).view(B, T, H2)
 
         # Processing time steps
         if hx is not None:
@@ -413,20 +458,27 @@ class LiGRU_Layer(nn.Module):
 
         return h
 
-    def _ligru_cell(self, w, ht):
+    def _ligru_cell(self, w: Tensor, ht: Tensor) -> Tensor:
         """Returns the hidden states for each time step.
+
+        Dispatches to the JIT-compiled loop for ReLU (the common case) to
+        eliminate Python per-step overhead.  Falls back to a Python loop for
+        other activations.
 
         Arguments
         ---------
-        wx : torch.Tensor
-            Linearly transformed input.
+        w : Tensor
+            Pre-computed input projection ``W * x``, shape ``[B, T, 2H]``.
+        ht : Tensor
+            Initial hidden state, shape ``[B, H]``.
         """
-        hiddens = []
-
-        # Sampling dropout mask
         drop_mask = self._sample_drop_mask(w)
 
-        # Loop over time axis
+        if self.nonlinearity == "relu":
+            return _ligru_cell_relu(w, self.u.weight, drop_mask, ht)
+
+        # Fallback for non-relu activations
+        hiddens = []
         for k in range(w.shape[1]):
             gates = w[:, k] + self.u(ht)
             at, zt = gates.chunk(2, 1)
@@ -434,12 +486,9 @@ class LiGRU_Layer(nn.Module):
             hcand = self.act(at) * drop_mask
             ht = zt * ht + (1 - zt) * hcand
             hiddens.append(ht)
+        return torch.stack(hiddens, dim=1)
 
-        # Stacking hidden states
-        h = torch.stack(hiddens, dim=1)
-        return h
-
-    def _init_drop(self, batch_size):
+    def _init_drop(self):
         """Initializes the recurrent dropout operation. To speed it up,
         the dropout masks are sampled in advance.
         """
@@ -470,7 +519,8 @@ class LiGRU_Layer(nn.Module):
             self.drop_mask_cnt = self.drop_mask_cnt + self.batch_size
 
         else:
-            self.drop_mask_te = self.drop_mask_te.to(w.device)
+            if self.drop_mask_te.device != w.device:
+                self.drop_mask_te = self.drop_mask_te.to(w.device)
             drop_mask = self.drop_mask_te
 
         return drop_mask
@@ -520,7 +570,7 @@ class LiGRU(nn.Module):
 
         if len(input_shape) > 3:
             self.reshape = True
-        self.fea_dim = float(torch.prod(torch.tensor(input_shape[2:])))
+        self.fea_dim = math.prod(input_shape[2:])
         self.batch_size = input_shape[0]
         self.rnn = self._init_layers()
 
@@ -532,7 +582,7 @@ class LiGRU(nn.Module):
         rnn = torch.nn.ModuleList([])
         current_dim = self.fea_dim
 
-        for i in range(self.num_layers):
+        for _ in range(self.num_layers):
             rnn_lay = LiGRU_Layer(
                 current_dim,
                 self.hidden_size,
@@ -580,28 +630,34 @@ class LiGRU(nn.Module):
             Input tensor.
         hx : torch.Tensor
         """
-        h = []
         if hx is not None:
             if self.bidirectional:
                 hx = hx.reshape(self.num_layers, self.batch_size * 2, self.hidden_size)
-        # Processing the different layers
-        for i, ligru_lay in enumerate(self.rnn):
-            if hx is not None:
-                x = ligru_lay(x, hx=hx[i])
-            else:
-                x = ligru_lay(x, hx=None)
-            h.append(x[:, -1, :])
 
-        h_stacked = torch.stack(h, dim=1)
+        # Pre-allocate hidden state storage: avoids a Python list + torch.stack.
+        # x[:, -1, :] = last time step, shape [B, H].
+        # We collect into a pre-sized tensor directly.
+        first_hx = hx[0] if hx is not None else None
+        x = self.rnn[0](x, hx=first_hx)
+        h_last = x.new_empty(self.num_layers, x.shape[0], self.hidden_size)
+        h_last[0] = x[:, -1, :]
+
+        for i in range(1, self.num_layers):
+            x = self.rnn[i](x, hx=hx[i] if hx is not None else None)
+            h_last[i] = x[:, -1, :]
 
         if self.bidirectional:
-            h_stacked = h_stacked.reshape(
-                h_stacked.shape[1] * 2, h_stacked.shape[0], self.hidden_size
+            h_last = h_last.reshape(
+                h_last.shape[0] * 2, h_last.shape[1], self.hidden_size
             )
-        else:
-            h_stacked = h_stacked.transpose(0, 1)
+        # else:
+        #     h_last = h_last.transpose(0, 1)
+        # h_last shape is [num_layers, B, H] — kept as-is so that the shape
+        # matches the init_states convention used by StreamingLightDFN and the
+        # ONNX streaming export.  Transposing to [B, L, H] would break the
+        # state-threading loop in the streaming inference script.
 
-        return x, h_stacked
+        return x, h_last
 
 
 def rnn_init(module):

@@ -1,4 +1,5 @@
 import math
+import random
 from typing import Optional
 
 import torch
@@ -11,114 +12,8 @@ from torch_audiomentations.core.transforms_interface import BaseWaveformTransfor
 from torch_audiomentations.utils.object_dict import ObjectDict
 
 from src.configs.config import AugmentationConfig
+from src.utils.audio import fft_convolve
 from src.utils.io import resample
-
-# Biquad coefficient helpers (Audio EQ Cookbook)
-# All return (b, a) as plain Python float lists [b0, b1, b2], [a0=1, a1, a2]
-
-
-def _lowpass_coefs(
-    center_freq: float, q_factor: float, sr: int
-) -> tuple[list[float], list[float]]:
-    """Lowpass biquad coefficients (Audio EQ Cookbook)."""
-    w0 = 2.0 * math.pi * center_freq / sr
-    alpha = math.sin(w0) / (2.0 * q_factor)
-    cos_w0 = math.cos(w0)
-    b0 = (1.0 - cos_w0) / 2.0
-    b1 = 1.0 - cos_w0
-    b2 = b0
-    a0 = 1.0 + alpha
-    a1 = -2.0 * cos_w0
-    a2 = 1.0 - alpha
-    return [b0 / a0, b1 / a0, b2 / a0], [1.0, a1 / a0, a2 / a0]
-
-
-def _highpass_coefs(
-    center_freq: float, q_factor: float, sr: int
-) -> tuple[list[float], list[float]]:
-    """Highpass biquad coefficients (Audio EQ Cookbook)."""
-    w0 = 2.0 * math.pi * center_freq / sr
-    alpha = math.sin(w0) / (2.0 * q_factor)
-    cos_w0 = math.cos(w0)
-    b0 = (1.0 + cos_w0) / 2.0
-    b1 = -(1.0 + cos_w0)
-    b2 = b0
-    a0 = 1.0 + alpha
-    a1 = -2.0 * cos_w0
-    a2 = 1.0 - alpha
-    return [b0 / a0, b1 / a0, b2 / a0], [1.0, a1 / a0, a2 / a0]
-
-
-def _lowshelf_coefs(
-    center_freq: float, q_factor: float, gain_db: float, sr: int
-) -> tuple[list[float], list[float]]:
-    """Lowshelf biquad coefficients (Audio EQ Cookbook)."""
-    w0 = 2.0 * math.pi * center_freq / sr
-    A = 10.0 ** (gain_db / 40.0)
-    alpha = math.sin(w0) / (2.0 * q_factor)
-    cos_w0 = math.cos(w0)
-    S = 2.0 * math.sqrt(A) * alpha
-    b0 = A * ((A + 1.0) - (A - 1.0) * cos_w0 + S)
-    b1 = 2.0 * A * ((A - 1.0) - (A + 1.0) * cos_w0)
-    b2 = A * ((A + 1.0) - (A - 1.0) * cos_w0 - S)
-    a0 = (A + 1.0) + (A - 1.0) * cos_w0 + S
-    a1 = -2.0 * ((A - 1.0) + (A + 1.0) * cos_w0)
-    a2 = (A + 1.0) + (A - 1.0) * cos_w0 - S
-    return [b0 / a0, b1 / a0, b2 / a0], [1.0, a1 / a0, a2 / a0]
-
-
-def _highshelf_coefs(
-    center_freq: float, q_factor: float, gain_db: float, sr: int
-) -> tuple[list[float], list[float]]:
-    """Highshelf biquad coefficients (Audio EQ Cookbook)."""
-    w0 = 2.0 * math.pi * center_freq / sr
-    A = 10.0 ** (gain_db / 40.0)
-    alpha = math.sin(w0) / (2.0 * q_factor)
-    cos_w0 = math.cos(w0)
-    S = 2.0 * math.sqrt(A) * alpha
-    b0 = A * ((A + 1.0) + (A - 1.0) * cos_w0 + S)
-    b1 = -2.0 * A * ((A - 1.0) + (A + 1.0) * cos_w0)
-    b2 = A * ((A + 1.0) + (A - 1.0) * cos_w0 - S)
-    a0 = (A + 1.0) - (A - 1.0) * cos_w0 + S
-    a1 = 2.0 * ((A - 1.0) - (A + 1.0) * cos_w0)
-    a2 = (A + 1.0) - (A - 1.0) * cos_w0 - S
-    return [b0 / a0, b1 / a0, b2 / a0], [1.0, a1 / a0, a2 / a0]
-
-
-def _peaking_eq_coefs(
-    center_freq: float, q_factor: float, gain_db: float, sr: int
-) -> tuple[list[float], list[float]]:
-    """Peaking EQ biquad coefficients (Audio EQ Cookbook)."""
-    w0 = 2.0 * math.pi * center_freq / sr
-    A = 10.0 ** (gain_db / 40.0)
-    alpha = math.sin(w0) / (2.0 * q_factor)
-    cos_w0 = math.cos(w0)
-    b0 = 1.0 + alpha * A
-    b1 = -2.0 * cos_w0
-    b2 = 1.0 - alpha * A
-    a0 = 1.0 + alpha / A
-    a1 = -2.0 * cos_w0
-    a2 = 1.0 - alpha / A
-    return [b0 / a0, b1 / a0, b2 / a0], [1.0, a1 / a0, a2 / a0]
-
-
-def _notch_coefs(
-    center_freq: float, q_factor: float, sr: int
-) -> tuple[list[float], list[float]]:
-    """Notch biquad coefficients (Audio EQ Cookbook)."""
-    w0 = 2.0 * math.pi * center_freq / sr
-    alpha = math.sin(w0) / (2.0 * q_factor)
-    cos_w0 = math.cos(w0)
-    b0 = 1.0
-    b1 = -2.0 * cos_w0
-    b2 = 1.0
-    a0 = 1.0 + alpha
-    a1 = -2.0 * cos_w0
-    a2 = 1.0 - alpha
-    return [b0 / a0, b1 / a0, b2 / a0], [1.0, a1 / a0, a2 / a0]
-
-
-# Augmentation 1: RandRemoveDc
 
 
 class RandRemoveDc(BaseWaveformTransform):
@@ -148,9 +43,6 @@ class RandRemoveDc(BaseWaveformTransform):
             targets=targets,
             target_rate=target_rate,
         )
-
-
-# Augmentation 2: RandLFilt
 
 
 class RandLFilt(BaseWaveformTransform):
@@ -208,8 +100,6 @@ class RandLFilt(BaseWaveformTransform):
             target_rate=target_rate,
         )
 
-
-# Augmentation 3: RandBiquadFilter
 
 _BIQUAD_FILTER_TYPES = [
     "lowpass",
@@ -269,30 +159,26 @@ class RandBiquadFilter(BaseWaveformTransform):
         )
         self.equalize_rms = equalize_rms
 
-    def _sample_coefs(self, sr: int) -> tuple[list[float], list[float]]:
-        """Sample a random filter type and return ``(b, a)`` coefficient lists."""
-        idx = int(torch.randint(0, len(self.filter_types), ()).item())
-        ftype = self.filter_types[idx]
-
+    def _apply_random_filter(self, waveform: Tensor, sr: int) -> Tensor:
+        """Apply one randomly sampled biquad filter stage."""
+        ftype = random.choice(self.filter_types)
         f_low, f_high = _BIQUAD_FREQ_RANGES[ftype]
-        # Log-uniform frequency sampling (matches Rust log_uniform)
-        log_freq = torch.empty(1).uniform_(math.log(f_low), math.log(f_high)).item()
-        center_freq = math.exp(log_freq)
-        q = torch.empty(1).uniform_(self.q_range[0], self.q_range[1]).item()
-        gain_db = torch.empty(1).uniform_(self.gain_range[0], self.gain_range[1]).item()
+        center_freq = math.exp(random.uniform(math.log(f_low), math.log(f_high)))
+        q = random.uniform(self.q_range[0], self.q_range[1])
+        gain_db = random.uniform(self.gain_range[0], self.gain_range[1])
 
         if ftype == "lowpass":
-            return _lowpass_coefs(center_freq, q, sr)
+            return AF.lowpass_biquad(waveform, sr, center_freq, q)
         elif ftype == "highpass":
-            return _highpass_coefs(center_freq, q, sr)
+            return AF.highpass_biquad(waveform, sr, center_freq, q)
         elif ftype == "lowshelf":
-            return _lowshelf_coefs(center_freq, q, gain_db, sr)
+            return AF.bass_biquad(waveform, sr, gain_db, center_freq, q)
         elif ftype == "highshelf":
-            return _highshelf_coefs(center_freq, q, gain_db, sr)
+            return AF.treble_biquad(waveform, sr, gain_db, center_freq, q)
         elif ftype == "peaking_eq":
-            return _peaking_eq_coefs(center_freq, q, gain_db, sr)
+            return AF.equalizer_biquad(waveform, sr, center_freq, gain_db, q)
         else:  # notch
-            return _notch_coefs(center_freq, q, sr)
+            return AF.bandreject_biquad(waveform, sr, center_freq, q)
 
     def apply_transform(
         self,
@@ -306,20 +192,11 @@ class RandBiquadFilter(BaseWaveformTransform):
         out = samples.clone()
 
         for i in range(B):
-            n = int(torch.randint(1, self.n_stages + 1, ()).item())
+            n = random.randint(1, self.n_stages)
             pre_rms = out[i].pow(2).mean().sqrt() if self.equalize_rms else None
 
             for _ in range(n):
-                b_list, a_list = self._sample_coefs(sr)
-                out[i] = AF.biquad(
-                    out[i],
-                    b_list[0],
-                    b_list[1],
-                    b_list[2],
-                    a_list[0],
-                    a_list[1],
-                    a_list[2],
-                )
+                out[i] = self._apply_random_filter(out[i], sr)
 
             if self.equalize_rms and pre_rms is not None:
                 post_rms = out[i].pow(2).mean().sqrt().clamp(min=1e-8)
@@ -336,9 +213,6 @@ class RandBiquadFilter(BaseWaveformTransform):
             targets=targets,
             target_rate=target_rate,
         )
-
-
-# Augmentation 4: RandResample
 
 
 class RandResample(BaseWaveformTransform):
@@ -403,9 +277,6 @@ class RandResample(BaseWaveformTransform):
         )
 
 
-# Augmentation 5: RandClipping
-
-
 class RandClipping(BaseWaveformTransform):
     """Random hard clipping.
 
@@ -454,9 +325,6 @@ class RandClipping(BaseWaveformTransform):
             targets=targets,
             target_rate=target_rate,
         )
-
-
-# Augmentation 6: RandZeroingTD
 
 
 class RandZeroingTD(BaseWaveformTransform):
@@ -523,9 +391,6 @@ class RandZeroingTD(BaseWaveformTransform):
             targets=targets,
             target_rate=target_rate,
         )
-
-
-# Augmentation 7: BandwidthLimiterAugmentation
 
 
 class BandwidthLimiterAugmentation(BaseWaveformTransform):
@@ -597,8 +462,6 @@ class BandwidthLimiterAugmentation(BaseWaveformTransform):
             target_rate=target_rate,
         )
 
-
-# Augmentation 8: AirAbsorptionAugmentation
 
 # ISO 9613-1 air absorption coefficients (×1e-3, units m⁻¹) for 9 frequency bands.
 # 8 scenarios covering different temperature / humidity combinations.
@@ -753,29 +616,6 @@ class RandReverbSim(BaseWaveformTransform):
         self.drr_range = drr_range
         self.offset_late_ms = offset_late_ms
 
-    @staticmethod
-    def _fft_convolve(signal: Tensor, kernel: Tensor, out_len: int) -> Tensor:
-        """FFT overlap-add convolution, trimmed to ``out_len`` samples.
-
-        Args:
-            signal: Shape (C, T).
-            kernel: Shape (N_rir,) — single-channel kernel applied to all channels.
-            out_len: Desired output length in samples.
-
-        Returns:
-            Convolved signal, shape (C, out_len).
-        """
-        T = signal.shape[-1]
-        k_len = kernel.shape[0]
-        fft_size = 1
-        while fft_size < T + k_len - 1:
-            fft_size <<= 1
-
-        S = torch.fft.rfft(signal, n=fft_size, dim=-1)  # (C, fft/2+1)
-        K = torch.fft.rfft(kernel.unsqueeze(0), n=fft_size, dim=-1)  # (1, fft/2+1)
-        y = torch.fft.irfft(S * K, n=fft_size, dim=-1)  # (C, fft_size)
-        return y[:, :out_len]
-
     def _generate_rir(self, rt60: float, sr: int, length: int) -> Tensor:
         """Generate a synthetic mono RIR with exponential decay.
 
@@ -829,7 +669,7 @@ class RandReverbSim(BaseWaveformTransform):
             rir[1:] = rir[1:] * reverb_scale
 
             rir = rir.to(samples.device)
-            reverbed = self._fft_convolve(out[i], rir, T)
+            reverbed = fft_convolve(out[i], rir)
 
             # Normalise to prevent clipping
             max_val = reverbed.abs().max().clamp(min=1e-8)
@@ -846,8 +686,6 @@ class RandReverbSim(BaseWaveformTransform):
         )
 
 
-# Augmentation 10: NoiseGenerator (Colored Noise)
-
 # NoiseGenerator is provided directly by torch_audiomentations as AddColoredNoise.
 # It supports the same f_decay range and SNR-based mixing, and is used via the
 # get_noise_generator() factory below.
@@ -859,14 +697,12 @@ NoiseGenerator = AddColoredNoise
 def get_speech_augmentations(
     augmentation_config: AugmentationConfig,
     sample_rate: int = 48000,
-    seed: Optional[int] = None,
 ) -> Compose:
     """Build the speech augmentation pipeline.
 
     Args:
         augmentation_config: Probabilities loaded from YAML config.
         sample_rate: Sample rate in Hz.
-        seed: Ignored — torch handles randomness natively.
 
     Returns:
         ``Compose`` pipeline accepting tensors of shape (B, C, T).
@@ -883,14 +719,12 @@ def get_speech_augmentations(
 def get_noise_augmentations(
     augmentation_config: AugmentationConfig,
     sample_rate: int = 48000,
-    seed: Optional[int] = None,
 ) -> Compose:
     """Build the noise augmentation pipeline.
 
     Args:
         augmentation_config: Probabilities loaded from YAML config.
         sample_rate: Sample rate in Hz.
-        seed: Ignored — torch handles randomness natively.
 
     Returns:
         ``Compose`` pipeline accepting tensors of shape (B, C, T).
@@ -907,14 +741,12 @@ def get_noise_augmentations(
 def get_speech_distortions_td(
     augmentation_config: AugmentationConfig,
     sample_rate: int = 48000,
-    seed: Optional[int] = None,
 ) -> Compose:
     """Build the time-domain speech distortion pipeline.
 
     Args:
         augmentation_config: Probabilities loaded from YAML config.
         sample_rate: Sample rate in Hz.
-        seed: Ignored — torch handles randomness natively.
 
     Returns:
         ``Compose`` pipeline accepting tensors of shape (B, C, T).
@@ -937,7 +769,7 @@ def get_noise_generator(
     f_decay_min: float = -2.0,
     f_decay_max: float = 2.0,
     sample_rate: int = 48000,
-    output_type: str = "dict",
+    output_type: str = "tensor",
 ) -> AddColoredNoise:
     """Return an :class:`AddColoredNoise` instance (legacy compatibility wrapper).
 
@@ -959,58 +791,179 @@ def get_noise_generator(
         max_f_decay=f_decay_max,
         p=p,
         sample_rate=sample_rate,
-        output_type="tensor",
+        output_type=output_type,
     )
 
 
-# Quick smoke-test  (python -m src.augmentations)
+def apply_augmentations(pipeline: Compose, audio: Tensor, sr: int) -> Tensor:
+    """Run a torch-audiomentations pipeline on a ``(C, T)`` Tensor.
+
+    Returns a ``(C, T)`` Tensor.
+    """
+    out = pipeline(audio.unsqueeze(0), sample_rate=sr)  # (1, C, T)
+    return out.squeeze(0)  # (C, T)
+
 
 if __name__ == "__main__":
-    logger.info("Testing augmentations (batch=2, channels=1, samples=48000) ...")
+    import sys
+    from pathlib import Path
 
-    audio = torch.randn(2, 1, 48000, dtype=torch.float32) * 0.1
+    import matplotlib.pyplot as plt
+    import torchaudio
 
-    cases: list[tuple[str, BaseWaveformTransform]] = [
-        ("RandRemoveDc", RandRemoveDc(p=1.0, sample_rate=48000)),
+    from src.utils.io import resample as io_resample
+
+    TARGET_SR = 48000
+    DEMO_DIR = Path("datasets/demo")
+    OUT_DIR = Path("datasets/demo/augmented")
+    OUT_DIR.mkdir(parents=True, exist_ok=True)
+
+    DEMO_FILES = ["noise.wav", "noisy.mp3", "speech.wav"]
+
+    def load_mono(path: Path, target_sr: int = TARGET_SR) -> tuple[Tensor, int]:
+        """Load audio, convert to mono float32, resample to target_sr."""
+        wav, sr = torchaudio.load(str(path))
+        if wav.shape[0] > 1:
+            wav = wav.mean(dim=0, keepdim=True)
+        if sr != target_sr:
+            wav = io_resample(wav, sr, target_sr)
+        return wav, target_sr
+
+    def plot_comparison(
+        orig: Tensor,
+        aug: Tensor,
+        sr: int,
+        title: str,
+        save_path: Path,
+    ) -> None:
+        """Plot waveform and spectrogram for original vs augmented."""
+        orig_np = orig.squeeze(0).numpy()
+        aug_np = aug.squeeze(0).numpy()
+        t = torch.arange(orig_np.shape[0]) / sr
+
+        fig, axes = plt.subplots(2, 2, figsize=(14, 6))
+        fig.suptitle(title, fontsize=13, fontweight="bold")
+
+        axes[0, 0].plot(t.numpy(), orig_np, linewidth=0.5)
+        axes[0, 0].set_title("Original — waveform")
+        axes[0, 0].set_xlabel("Time (s)")
+        axes[0, 0].set_ylabel("Amplitude")
+
+        axes[0, 1].plot(t.numpy(), aug_np, linewidth=0.5, color="tab:orange")
+        axes[0, 1].set_title("Augmented — waveform")
+        axes[0, 1].set_xlabel("Time (s)")
+        axes[0, 1].set_ylabel("Amplitude")
+
+        n_fft = 1024
+        hop = 256
+        for ax, signal, label, cmap in [
+            (axes[1, 0], orig_np, "Original — spectrogram", "viridis"),
+            (axes[1, 1], aug_np, "Augmented — spectrogram", "plasma"),
+        ]:
+            spec = torch.stft(
+                torch.from_numpy(signal),
+                n_fft=n_fft,
+                hop_length=hop,
+                return_complex=True,
+            )
+            log_power = (spec.abs() + 1e-8).log10().numpy()
+            im = ax.imshow(
+                log_power,
+                origin="lower",
+                aspect="auto",
+                extent=[0, len(signal) / sr, 0, sr / 2],
+                cmap=cmap,
+            )
+            ax.set_title(label)
+            ax.set_xlabel("Time (s)")
+            ax.set_ylabel("Frequency (Hz)")
+            plt.colorbar(im, ax=ax, label="log₁₀(|STFT|)")
+
+        plt.tight_layout()
+        plt.savefig(save_path, dpi=120)
+        plt.close(fig)
+        logger.info(f"    plot → {save_path}")
+
+    AUGMENTATION_CASES: list[tuple[str, BaseWaveformTransform]] = [
+        ("RandRemoveDc", RandRemoveDc(p=1.0, sample_rate=TARGET_SR)),
         ("RandLFilt", RandLFilt(p=1.0)),
-        ("RandBiquadFilter", RandBiquadFilter(p=1.0, sample_rate=48000)),
-        ("RandResample", RandResample(p=1.0, sample_rate=48000)),
+        ("RandBiquadFilter", RandBiquadFilter(p=1.0, sample_rate=TARGET_SR)),
+        ("RandResample", RandResample(p=1.0, sample_rate=TARGET_SR)),
         ("RandClipping", RandClipping(p=1.0)),
         ("RandZeroingTD", RandZeroingTD(p=1.0)),
         (
             "BandwidthLimiterAugmentation",
-            BandwidthLimiterAugmentation(p=1.0, sample_rate=48000),
+            BandwidthLimiterAugmentation(p=1.0, sample_rate=TARGET_SR),
         ),
         (
             "AirAbsorptionAugmentation",
-            AirAbsorptionAugmentation(p=1.0, sample_rate=48000),
+            AirAbsorptionAugmentation(p=1.0, sample_rate=TARGET_SR),
         ),
-        ("RandReverbSim", RandReverbSim(p=1.0, sample_rate=48000)),
-        ("NoiseGenerator (AddColoredNoise)", NoiseGenerator(p=1.0, sample_rate=48000)),
+        ("RandReverbSim", RandReverbSim(p=1.0, sample_rate=TARGET_SR)),
+        ("NoiseGenerator", NoiseGenerator(p=1.0, sample_rate=TARGET_SR)),
     ]
 
-    for name, aug in cases:
-        aug.train()
-        try:
-            result = aug(audio, sample_rate=48000)
-            shape = result.samples.shape if hasattr(result, "samples") else result.shape
-            logger.info(f"  ok  {name}: {shape}")
-        except Exception as exc:
-            logger.error(f"  ERR {name}: {exc}")
-
-    logger.info("Pipelines ...")
     cfg = AugmentationConfig()
-    for name, pipeline in [
-        ("get_speech_augmentations", get_speech_augmentations(cfg)),
-        ("get_noise_augmentations", get_noise_augmentations(cfg)),
-        ("get_speech_distortions_td", get_speech_distortions_td(cfg)),
-    ]:
-        pipeline.train()
-        try:
-            result = pipeline(audio, sample_rate=48000)
-            shape = result.samples.shape if hasattr(result, "samples") else result.shape
-            logger.info(f"  ok  {name}: {shape}")
-        except Exception as exc:
-            logger.error(f"  ERR {name}: {exc}")
+    PIPELINE_CASES: list[tuple[str, Compose]] = [
+        ("speech_pipeline", get_speech_augmentations(cfg, TARGET_SR)),
+        ("noise_pipeline", get_noise_augmentations(cfg, TARGET_SR)),
+        ("distortion_pipeline", get_speech_distortions_td(cfg, TARGET_SR)),
+    ]
 
-    logger.info("Done.")
+    errors = 0
+    for fname in DEMO_FILES:
+        fpath = DEMO_DIR / fname
+        if not fpath.exists():
+            logger.warning(f"File not found, skipping: {fpath}")
+            continue
+
+        logger.info(f"\n=== {fname} ===")
+        wav, sr = load_mono(fpath)
+        stem = fpath.stem
+
+        for aug_name, aug in AUGMENTATION_CASES:
+            aug.train()
+            try:
+                batch = wav.unsqueeze(0)  # (1, C, T)
+                result = aug(batch, sample_rate=sr)
+                aug_wav = (
+                    result.samples.squeeze(0)
+                    if hasattr(result, "samples")
+                    else result.squeeze(0)
+                )
+
+                out_wav = OUT_DIR / f"{stem}__{aug_name}.wav"
+                torchaudio.save(str(out_wav), aug_wav, sr)
+
+                out_plot = OUT_DIR / f"{stem}__{aug_name}.png"
+                plot_comparison(wav, aug_wav, sr, f"{fname}  ·  {aug_name}", out_plot)
+
+                logger.info(f"  ok  {aug_name}")
+            except Exception as exc:
+                logger.error(f"  ERR {aug_name}: {exc}")
+                errors += 1
+
+        for pipe_name, pipeline in PIPELINE_CASES:
+            pipeline.train()
+            try:
+                batch = wav.unsqueeze(0)
+                result = pipeline(batch, sample_rate=sr)
+                aug_wav = (
+                    result.samples.squeeze(0)
+                    if hasattr(result, "samples")
+                    else result.squeeze(0)
+                )
+
+                out_wav = OUT_DIR / f"{stem}__{pipe_name}.wav"
+                torchaudio.save(str(out_wav), aug_wav, sr)
+
+                out_plot = OUT_DIR / f"{stem}__{pipe_name}.png"
+                plot_comparison(wav, aug_wav, sr, f"{fname}  ·  {pipe_name}", out_plot)
+
+                logger.info(f"  ok  {pipe_name}")
+            except Exception as exc:
+                logger.error(f"  ERR {pipe_name}: {exc}")
+                errors += 1
+
+    logger.info(f"\nDone. Output saved to {OUT_DIR.resolve()}  (errors: {errors})")
+    sys.exit(1 if errors else 0)

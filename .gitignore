@@ -33,4 +33,7 @@ datasets/lists/
 datasets/hdf5/
 datasets/downloads/
 wandb/*
-checkpoints/
+checkpoints/best.pt
+checkpoints/last.pt
+!checkpoints/best.onnx
+!checkpoints/streaming_best.onnx

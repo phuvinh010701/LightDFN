@@ -6,8 +6,9 @@ import torch
 from torch import Tensor
 from torch.utils.data import Dataset
 
-from src.dataloader.td import Sample, TdDataset
+from src.dataloader.td import TdDataset
 from src.utils.erb import create_erb_fb, erb_fb_widths
+from src.types import Sample
 
 
 def _norm_alpha(sr: int, hop_size: int, norm_tau: float) -> float:
@@ -85,7 +86,8 @@ def _running_unit_norm(spec: Tensor, alpha: float) -> Tensor:
     one_minus_alpha = 1.0 - alpha
     for t in range(T):
         frame = spec[:, :, t]
-        state = frame.abs() * one_minus_alpha + state * alpha
+        # Clamp prevents underflow during silence: state → 0 would make frame/sqrt(state) → Inf/NaN.
+        state = (frame.abs() * one_minus_alpha + state * alpha).clamp(min=1e-10)
         out[:, :, t] = frame / state.sqrt()
     return out
 

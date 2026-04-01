@@ -9,13 +9,13 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 import torch.nn as nn
+import wandb
 from loguru import logger
 from torch import Tensor
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
 from tqdm import tqdm
 
-import wandb
 from src.configs.config import LossConfig, ModelConfig, TrainConfig, load_config
 from src.dataloader.loader import DataLoaderBuilder, DeepFilterNetDataLoader, DsBatch
 from src.losses.loss import Loss
@@ -99,8 +99,8 @@ def run_epoch(
             model_input = spec_noisy if is_train else spec_noisy.clone()
             enhanced, mask, lsnr, _ = model(model_input, feat_erb, feat_spec)
 
-            snrs = torch.from_numpy(batch.snr).float().to(device, non_blocking=True)
-            max_freq = torch.from_numpy(batch.max_freq).to(device, non_blocking=True)
+            snrs = batch.snr.float().to(device, non_blocking=True)
+            max_freq = batch.max_freq.to(device, non_blocking=True)
 
             try:
                 loss = loss_fn(

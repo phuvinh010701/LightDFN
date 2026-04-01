@@ -28,8 +28,6 @@ With default config (emb_num_layers=3, df_num_layers=2, hidden=256):
     h_df  : [2, 1, 256]
 """
 
-from __future__ import annotations
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -38,19 +36,21 @@ from torch import Tensor
 from src.model.lightdeepfilternet import LightDeepFilterNet
 
 
-def _non_pad_sequential(seq: nn.Sequential) -> nn.Sequential:
+def _non_pad_sequential(seq) -> nn.Sequential:
     """Return a new Sequential with ConstantPad2d layers stripped out.
 
     Called once at init to pre-cache the layers used in ``_conv_with_buf``,
     avoiding an ``isinstance`` check on every streaming frame.
     """
-    return nn.Sequential(
-        *[layer for layer in seq if not isinstance(layer, nn.ConstantPad2d)]
-    )
+    layers = []
+    for layer in seq:
+        if not isinstance(layer, nn.ConstantPad2d):
+            layers.append(layer)
+    return nn.Sequential(*layers)
 
 
 def _conv_with_buf(
-    conv_layers: nn.Sequential,
+    conv_layers,
     buf: Tensor,
     x: Tensor,
 ) -> tuple[Tensor, Tensor]:

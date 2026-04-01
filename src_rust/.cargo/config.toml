@@ -1,0 +1,13 @@
+# Maximise WASM performance:
+#   +simd128           — 128-bit SIMD (universally supported in modern browsers)
+#   +relaxed-simd      — relaxed SIMD (Chrome/Firefox/Safari 2023+; minor extra throughput)
+#   +bulk-memory       — fast memcpy/memset intrinsics
+#   +nontrapping-fptoint — eliminates trapping float→int casts in tight loops
+[target.wasm32-unknown-unknown]
+rustflags = [
+  "-C", "target-feature=+simd128,+relaxed-simd,+bulk-memory,+nontrapping-fptoint",
+  # 32 MB WASM call stack: tract's into_typed() does deep recursive graph
+  # analysis that overflows the default 1 MB stack on complex GRU+conv models.
+  "-C", "link-arg=-z",
+  "-C", "link-arg=stack-size=33554432",
+]

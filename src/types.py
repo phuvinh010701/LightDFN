@@ -1,7 +1,7 @@
-from typing import Literal
 from dataclasses import dataclass
+from typing import Literal
+
 from torch import Tensor
-import numpy as np
 
 AudioDatasetType = Literal["speech", "noise", "rir"]
 SplitType = Literal["train", "valid", "test"]
@@ -82,8 +82,8 @@ class DsBatch:
     noise: Tensor
     feat_erb: Tensor
     feat_spec: Tensor
-    lengths: np.ndarray
-    snr: np.ndarray
-    gain: np.ndarray
-    max_freq: np.ndarray
-    sample_id: np.ndarray
+    lengths: Tensor
+    snr: Tensor
+    gain: Tensor
+    max_freq: Tensor
+    sample_id: Tensor

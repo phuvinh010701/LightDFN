@@ -1,0 +1,60 @@
+[package]
+name = "lightdfn-wasm"
+version = "0.1.0"
+edition = "2021"
+description = "LightDeepFilterNet DSP module (STFT, ERB, features) — compiled to WebAssembly"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# WASM bindings
+wasm-bindgen = "0.2.87"
+js-sys = "0.3"
+console_error_panic_hook = "0.1.1"
+getrandom = { version = "0.2", features = ["js"] }
+
+# Real FFT (r2c / c2r) — pure Rust, compiles to WASM with SIMD
+realfft = "3"
+
+# tract ONNX runtime — pure Rust, compiles to both native and WASM
+tract-onnx = "0.21"
+
+# tract NNEF — load pre-typed models without runtime into_typed() (WASM + native)
+tract-nnef = "0.21"
+
+# anyhow — for converter binary (native only)
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+anyhow = "1"
+
+# Web APIs (for performance timing + console logging)
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+web-sys = { version = "0.3", features = ["Performance", "Window", "console"] }
+
+[dev-dependencies]
+wasm-bindgen-test = "0.3"
+
+# ── release profile: maximise DSP throughput ──────────────────────────────────
+[profile.release]
+opt-level = 3
+lto = true           # fat LTO: maximum cross-crate inlining, smaller + faster WASM
+codegen-units = 1
+panic = "abort"      # smaller binary, faster panics
+
+# ── wasm-pack release profile with relaxed SIMD ───────────────────────────────
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = [
+  "-O4",
+  "--enable-simd",
+  "--enable-relaxed-simd",          # Relaxed SIMD for better performance
+  "--enable-bulk-memory",
+  "--enable-nontrapping-float-to-int",
+  "--enable-sign-ext",
+  "--enable-mutable-globals",
+  "--enable-multivalue",
+  "--enable-reference-types",
+  "--fast-math",                     # Aggressive math optimizations
+  "--low-memory-unused",             # Remove unused memory
+  "--flatten",                       # Inline more aggressively
+  "--rereloop",                      # Optimize control flow
+]

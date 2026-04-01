@@ -9,10 +9,10 @@ from torch import Tensor
 from torch.utils.data import Dataset
 
 from src.augmentations import (
+    apply_augmentations,
     get_noise_augmentations,
     get_speech_augmentations,
     get_speech_distortions_td,
-    apply_augmentations,
 )
 from src.configs.config import AugmentationConfig
 from src.dataloader.dataset_config import DatasetConfig, DatasetEntry
@@ -27,6 +27,9 @@ from src.utils.audio import (
 from src.utils.dataloader import lookup
 
 logger = logging.getLogger(__name__)
+
+DEFAULT_SNRS = [-5, 0, 5, 10, 20, 40]
+DEFAULT_GAINS = [-6, 0, 6]
 
 
 class TdDataset(Dataset):
@@ -55,9 +58,6 @@ class TdDataset(Dataset):
         seed:         Base RNG seed — sample ``i`` uses ``seed + i``.
     """
 
-    _DEFAULT_SNRS = [-5, 0, 5, 10, 20, 40]
-    _DEFAULT_GAINS = [-6, 0, 6]
-
     def __init__(
         self,
         speech_files: list[DatasetEntry],
@@ -68,8 +68,8 @@ class TdDataset(Dataset):
         sr: int = 48_000,
         max_len_s: float | None = None,
         num_channels: int = 1,
-        snrs: list[int] | None = None,
-        gains: list[int] | None = None,
+        snrs: list[int] = DEFAULT_SNRS,
+        gains: list[int] = DEFAULT_GAINS,
         n_noises: tuple[int, int] = (2, 5),
         seed: int = 42,
     ) -> None:
@@ -79,8 +79,8 @@ class TdDataset(Dataset):
         self.sr = sr
         self.max_len_s = max_len_s
         self.num_channels = num_channels
-        self.snrs = snrs or self._DEFAULT_SNRS
-        self.gains = gains or self._DEFAULT_GAINS
+        self.snrs = snrs
+        self.gains = gains
         self.n_noises = n_noises
         self.seed = seed
         self.is_train = split == "train"
@@ -95,15 +95,18 @@ class TdDataset(Dataset):
         self._noise_cum = self._cumulative(self._noise)
         self._rir_cum = self._cumulative(self._rir)
 
-        self._speech_aug = get_speech_augmentations(aug_config, sample_rate=sr)
-        self._noise_aug = get_noise_augmentations(aug_config, sample_rate=sr)
-        self._distortions = (
-            get_speech_distortions_td(aug_config, sample_rate=sr)
-            if self.is_train
-            else None
-        )
-        for aug in filter(None, [self._speech_aug, self._noise_aug, self._distortions]):
-            aug.train()
+        if self.is_train:
+            self._speech_aug = get_speech_augmentations(aug_config, sample_rate=sr)
+            self._noise_aug = get_noise_augmentations(aug_config, sample_rate=sr)
+            self._distortions = get_speech_distortions_td(aug_config, sample_rate=sr)
+            for aug in filter(
+                None, [self._speech_aug, self._noise_aug, self._distortions]
+            ):
+                aug.train()
+        else:
+            self._speech_aug = None
+            self._noise_aug = None
+            self._distortions = None
 
         logger.info(
             "%s | split=%s | speech=%d | noise=%d | rir=%d",
@@ -130,7 +133,7 @@ class TdDataset(Dataset):
         else:
             speech_rev = None
 
-        # Use fully reverberant speech as the noisy mixture base (matches Rust dataset.rs).
+        # Use fully reverberant speech as the noisy mixture base.
         # When no RIR was applied, speech_rev is None and we fall back to clean speech.
         speech_distorted_base = speech_rev if speech_rev is not None else speech
         speech_input = (
@@ -170,7 +173,8 @@ class TdDataset(Dataset):
                     start = int(rng.integers(0, audio.shape[1] - max_s + 1))
                     audio = audio[:, start : start + max_s]
 
-            audio = apply_augmentations(self._speech_aug, audio, self.sr)
+            if self._speech_aug is not None:
+                audio = apply_augmentations(self._speech_aug, audio, self.sr)
 
             if audio.abs().max() > 1e-8:
                 return audio
@@ -179,7 +183,9 @@ class TdDataset(Dataset):
             key_idx = int(rng.integers(0, ds.effective_size))
             audio = torch.from_numpy(ds.get_at_least(key_idx, min_samples, rng))
 
-        return apply_augmentations(self._speech_aug, audio, self.sr)
+        if self._speech_aug is not None:
+            return apply_augmentations(self._speech_aug, audio, self.sr)
+        return audio
 
     def _load_noise(self, rng: np.random.Generator) -> Tensor:
         if not self._noise_cum:
@@ -187,7 +193,9 @@ class TdDataset(Dataset):
         flat_idx = int(rng.integers(0, self._noise_cum[-1]))
         ds, key_idx = lookup(self._noise, self._noise_cum, flat_idx)
         audio = torch.from_numpy(ds.get(key_idx, rng))
-        return apply_augmentations(self._noise_aug, audio, self.sr)
+        if self._noise_aug is not None:
+            return apply_augmentations(self._noise_aug, audio, self.sr)
+        return audio
 
     def _load_and_combine_noise(
         self, speech_shape: tuple[int, ...], rng: np.random.Generator
@@ -223,7 +231,7 @@ class TdDataset(Dataset):
         rir_target = rir.clone()
         if cutoff < len(rir_target):
             tail = torch.arange(len(rir_target) - cutoff, dtype=torch.float32)
-            # Match Rust supress_late: decay[i] = 10^(-(i/sr) / tau),
+            # supress_late: decay[i] = 10^(-(i/sr) / tau),
             # where tau = -rt60 / log10(10^(-60/20)) = rt60 / 3  (rt60=0.5 → tau≈0.167s)
             _rt60_tau = 0.5 / 3.0
             rir_target[cutoff:] *= torch.pow(

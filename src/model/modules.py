@@ -192,7 +192,9 @@ class GroupedLinearEinsum(nn.Module):
         x = x.view(new_shape)
         # The better way, but not supported by torchscript
         # x = x.unflatten(-1, (self.groups, self.ws))  # [..., G, I/G]
-        x = torch.einsum("btgi,gih->btgh", x, self.weight)  # [..., G, H/G]
+        # einsum "btgi,gih->btgh" equivalent without Einsum op:
+        # unsqueeze x to [B, T, G, 1, ws], matmul broadcasts [G] batch dim → [B, T, G, 1, H/G]
+        x = x.unsqueeze(-2).matmul(self.weight).squeeze(-2)  # [B, T, G, H/G]
         x = x.flatten(2, 3)  # [B, T, H]
 
         return x
@@ -634,17 +636,15 @@ class LiGRU(nn.Module):
             if self.bidirectional:
                 hx = hx.reshape(self.num_layers, self.batch_size * 2, self.hidden_size)
 
-        # Pre-allocate hidden state storage: avoids a Python list + torch.stack.
-        # x[:, -1, :] = last time step, shape [B, H].
-        # We collect into a pre-sized tensor directly.
         first_hx = hx[0] if hx is not None else None
         x = self.rnn[0](x, hx=first_hx)
-        h_last = x.new_empty(self.num_layers, x.shape[0], self.hidden_size)
-        h_last[0] = x[:, -1, :]
+        h_parts = [x[:, -1, :]]
 
         for i in range(1, self.num_layers):
             x = self.rnn[i](x, hx=hx[i] if hx is not None else None)
-            h_last[i] = x[:, -1, :]
+            h_parts.append(x[:, -1, :])
+
+        h_last = torch.stack(h_parts, dim=0)  # [num_layers, B, H]
 
         if self.bidirectional:
             h_last = h_last.reshape(

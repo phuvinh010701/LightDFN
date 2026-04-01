@@ -7,14 +7,13 @@ from torch import Tensor
 from torch.utils.data import Dataset
 
 from src.dataloader.td import TdDataset
-from src.utils.erb import create_erb_fb, erb_fb_widths
 from src.types import Sample
+from src.utils.erb import create_erb_fb, erb_fb_widths
 
 
 def _norm_alpha(sr: int, hop_size: int, norm_tau: float) -> float:
     """Compute exponential smoothing factor alpha from a time-constant tau.
 
-    Matches DeepFilterNet's ``get_norm_alpha``:
     ``alpha = exp(-1 / (frames_per_second * tau))``.
 
     Args:
@@ -33,11 +32,10 @@ def _norm_alpha(sr: int, hop_size: int, norm_tau: float) -> float:
 def _running_mean_norm_erb(power_db: Tensor, alpha: float) -> Tensor:
     """Exponential running-mean normalisation over the time axis for ERB features.
 
-    Ports Rust ``band_mean_norm_erb``:
     ``state = x*(1-alpha) + state*alpha;  out = (x - state) / 40``
 
-    State is initialised from -60 dB (band 0) to -90 dB (band E-1), matching
-    ``MEAN_NORM_INIT = [-60., -90.]`` in the Rust library.
+    State is initialised from -60 dB (band 0) to -90 dB (band E-1),
+    ``MEAN_NORM_INIT = [-60., -90.]``
 
     Args:
         power_db: Log-power ERB features, shape ``[C, T, E]``.
@@ -65,7 +63,6 @@ def _running_mean_norm_erb(power_db: Tensor, alpha: float) -> Tensor:
 def _running_unit_norm(spec: Tensor, alpha: float) -> Tensor:
     """Exponential running unit-normalisation over the time axis for complex features.
 
-    Ports Rust ``band_unit_norm``:
     ``state = |x|*(1-alpha) + state*alpha;  out = x / sqrt(state)``
 
     State is initialised from 0.001 (bin 0) to 0.0001 (bin F-1), matching
@@ -167,11 +164,11 @@ class FftDataset(Dataset):
         # 2. Convert to log-power in dB
         feat_erb_db = (feat_erb + 1e-10).log10() * 10.0  # [C, T, E]
 
-        # 3. Running exponential mean normalisation + /40  (matches Rust band_mean_norm_erb)
+        # 3. Running exponential mean normalisation + /40
         feat_erb = _running_mean_norm_erb(feat_erb_db, self.alpha)  # [C, T, E]
 
         # --- Complex spec features ---
-        # Running per-frequency unit normalisation  (matches Rust band_unit_norm)
+        # Running per-frequency unit normalisation
         spec_slice = stft[:, : self.nb_spec, :]  # [C, F', T]
         spec_normed = _running_unit_norm(spec_slice, self.alpha)  # [C, F', T]
         feat_spec = spec_normed.permute(0, 2, 1)  # [C, T, F']

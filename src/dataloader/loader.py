@@ -3,7 +3,6 @@
 import math
 from collections.abc import Iterator
 
-import numpy as np
 import torch
 from loguru import logger
 from torch import Tensor
@@ -23,8 +22,8 @@ def collate_fn(samples: list[Sample]) -> DsBatch:
     Feature tensors are stacked without padding (same frame count when
     ``max_len_s`` is fixed).
     """
-    lengths = np.array([s.speech.shape[-1] for s in samples], dtype=np.int64)
-    max_len = int(lengths.max())
+    lengths = torch.tensor([s.speech.shape[-1] for s in samples], dtype=torch.int64)
+    max_len = int(lengths.max().item())
 
     def pad_and_stack(tensors: list[Tensor]) -> Tensor:
         """Zero-pad each tensor to ``max_len`` along the last dimension and stack."""
@@ -43,10 +42,10 @@ def collate_fn(samples: list[Sample]) -> DsBatch:
         feat_erb=torch.stack([s.feat_erb for s in samples]),
         feat_spec=torch.stack([s.feat_spec for s in samples]),
         lengths=lengths,
-        snr=np.array([s.snr for s in samples], dtype=np.int32),
-        gain=np.array([s.gain for s in samples], dtype=np.int32),
-        max_freq=np.array([s.max_freq for s in samples], dtype=np.int32),
-        sample_id=np.array([s.sample_id for s in samples], dtype=np.int64),
+        snr=torch.tensor([s.snr for s in samples], dtype=torch.int32),
+        gain=torch.tensor([s.gain for s in samples], dtype=torch.int32),
+        max_freq=torch.tensor([s.max_freq for s in samples], dtype=torch.int32),
+        sample_id=torch.tensor([s.sample_id for s in samples], dtype=torch.int64),
     )
 
 
@@ -93,13 +92,16 @@ class DeepFilterNetDataLoader:
         num_workers: int = 0,
         num_prefetch_batches: int = 8,
         seed: int = 42,
+        shuffle: bool = True,
     ) -> None:
         self.dataset = dataset
         self.batch_size = batch_size
         self.num_workers = num_workers
         self.num_prefetch_batches = num_prefetch_batches
         self.seed = seed
-        self._sampler = _EpochShuffleSampler(len(dataset), seed=seed)  # type: ignore[arg-type]
+        self._sampler = (
+            _EpochShuffleSampler(len(dataset), seed=seed) if shuffle else None
+        )  # type: ignore[arg-type]
         prefetch = (
             max(1, math.ceil(num_prefetch_batches / max(num_workers, 1)))
             if num_workers > 0
@@ -109,6 +111,7 @@ class DeepFilterNetDataLoader:
             dataset,
             batch_size=batch_size,
             sampler=self._sampler,
+            shuffle=False if self._sampler is not None else shuffle,
             num_workers=num_workers,
             prefetch_factor=prefetch,
             persistent_workers=num_workers > 0,
@@ -121,6 +124,8 @@ class DeepFilterNetDataLoader:
 
     def start_epoch(self, epoch_idx: int) -> None:
         """Reseed the sampler for the given epoch index."""
+        if self._sampler is None:
+            return
         logger.debug(f"Seeding DataLoader with seed {self.seed + epoch_idx}")
         self._sampler.set_epoch(epoch_idx)
 
@@ -194,6 +199,7 @@ class DataLoaderBuilder:
             num_workers=self.loader_config.num_workers,
             num_prefetch_batches=self.loader_config.num_prefetch_batches,
             seed=self.loader_config.seed,
+            shuffle=split == "train",
         )
 
 

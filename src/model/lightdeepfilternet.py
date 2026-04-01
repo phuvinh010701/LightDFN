@@ -368,22 +368,23 @@ class LightDeepFilteringModule(nn.Module):
         spec:  [B, 1, T, F, 2]
         coefs: [B, O, T, F_df, 2]
         """
-        O = self.frame_size
+        O_len = self.frame_size
         F_df = self.num_freqs
 
         # Build temporal window: [B, 1, T, F, O, 2]
-        if O > 1:
+        if O_len > 1:
             spec_padded = F.pad(
                 spec, [0, 0, 0, 0, self._pad_before, self._pad_after]
             )  # [B, 1, T+pad, F, 2]
 
             # Replace unfold (unsupported by TorchScript ONNX exporter when the
             # input size is not statically accessible) with explicit slice stacking.
-            # range(O) is a static Python range so the loop is unrolled at trace
+            # range(O_len) is a static Python range so the loop is unrolled at trace
             # time, producing O plain Slice ops instead of a dynamic Unfold.
             T = spec.shape[2]
             spec_win = torch.stack(
-                [spec_padded[:, :, i : i + T, :, :] for i in range(O)], dim=4
+                [spec_padded[:, :, i : i + T, :, :] for i in range(O_len)],
+                dim=4,
             )  # [B, 1, T, F, O, 2]
         else:
             spec_win = spec.unsqueeze(-2)  # [B, 1, T, F, 1, 2]

@@ -66,6 +66,7 @@ def export(
     config_path: Path,
     chunk_frames: int = 512,
     streaming: bool = False,
+    dfn_style: bool = False,
     wasm: bool = False,
     opset: int = 18,
     simplify: bool = False,
@@ -93,7 +94,9 @@ def export(
         opset = min(opset, 14)
         logger.info(f"WASM target: dynamo=False, opset capped at {opset}")
 
-    if streaming:
+    if dfn_style:
+        _export_split(model, model_cfg, loader_cfg, out_path, opset)
+    elif streaming:
         _export_streaming(model, model_cfg, loader_cfg, out_path, opset)
     else:
         _export_chunked(model, model_cfg, loader_cfg, out_path, chunk_frames, opset)
@@ -177,6 +180,130 @@ def _export_streaming(model, model_cfg, loader_cfg, out_path, opset):
     logger.info("Export done.")
 
 
+def _export_split(model, model_cfg, loader_cfg, out_path, opset):
+    """DeepFilterNet style: Export 3 separate models with dynamic time axis."""
+    device = next(model.parameters()).device
+    model.eval()
+    
+    # 1. Base out directory
+    out_dir = out_path.parent / "dfn_style"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    logger.info(f"Split export (DFN style) → {out_dir}")
+
+    # Dummy inputs for full trace
+    spec, feat_erb, feat_spec = _build_dummy_inputs(model_cfg, loader_cfg, T=16, device=device)
+    
+    # --- Export Encoder ---
+    # Re-align feat_spec like the model expects internally [B, 2, T, F]
+    feat_spec_enc = feat_spec.squeeze(1).permute(0, 3, 1, 2)
+    
+    # We wrap the forward to ensure 4D outputs [B, C, T, F]
+    class EncoderWrapper(nn.Module):
+        def __init__(self, enc):
+            super().__init__()
+            self.enc = enc
+        def forward(self, feat_erb, feat_spec):
+            e0, e1, e2, e3, emb, c0, lsnr = self.enc(feat_erb, feat_spec)
+            # Ensure all are 4D [B, C, S, F]
+            # emb: [B, T, H] -> [B, H, T, 1]
+            emb = emb.permute(0, 2, 1).unsqueeze(-1)
+            # lsnr: [B, T, 1] -> [B, 1, T, 1]
+            lsnr = lsnr.permute(0, 2, 1).unsqueeze(-1)
+            return e0, e1, e2, e3, emb, c0, lsnr
+
+    enc_wrapper = EncoderWrapper(model.enc)
+    enc_path = out_dir / "enc.onnx"
+    logger.info(f"  Exporting Encoder → {enc_path.name}")
+    torch.onnx.export(
+        enc_wrapper,
+        args=(feat_erb, feat_spec_enc),
+        f=str(enc_path),
+        input_names=["feat_erb", "feat_spec"],
+        output_names=["e0", "e1", "e2", "e3", "emb", "c0", "lsnr"],
+        dynamic_axes={
+            "feat_erb": {2: "S"},
+            "feat_spec": {2: "S"},
+            "e0": {2: "S"}, "e1": {2: "S"}, "e2": {2: "S"}, "e3": {2: "S"},
+            "emb": {2: "S"}, "c0": {2: "S"}, "lsnr": {2: "S"}
+        },
+        opset_version=opset,
+        export_params=True,
+        do_constant_folding=True,
+        dynamo=False,
+    )
+
+    # We need intermediate results for tracing next stages
+    with torch.no_grad():
+        e0, e1, e2, e3, emb, c0, _lsnr = enc_wrapper(feat_erb, feat_spec_enc)
+
+    # --- Export ERB Decoder ---
+    # Wrap to handle 4D emb
+    class ErbDecWrapper(nn.Module):
+        def __init__(self, dec):
+            super().__init__()
+            self.dec = dec
+        def forward(self, emb, e3, e2, e1, e0):
+            # emb: [B, H, T, 1] -> [B, T, H]
+            emb = emb.squeeze(-1).permute(0, 2, 1)
+            return self.dec(emb, e3, e2, e1, e0)
+
+    erb_wrapper = ErbDecWrapper(model.erb_dec)
+    erb_path = out_dir / "erb_dec.onnx"
+    logger.info(f"  Exporting ERB Decoder → {erb_path.name}")
+    torch.onnx.export(
+        erb_wrapper,
+        args=(emb, e3, e2, e1, e0),
+        f=str(erb_path),
+        input_names=["emb", "e3", "e2", "e1", "e0"],
+        output_names=["mask"],
+        dynamic_axes={
+            "emb": {2: "S"},
+            "e3": {2: "S"}, "e2": {2: "S"}, "e1": {2: "S"}, "e0": {2: "S"},
+            "mask": {2: "S"}
+        },
+        opset_version=opset,
+        export_params=True,
+        do_constant_folding=True,
+        dynamo=False,
+    )
+
+    # --- Export DF Decoder ---
+    class DfDecWrapper(nn.Module):
+        def __init__(self, dec):
+            super().__init__()
+            self.dec = dec
+        def forward(self, emb, c0):
+            # emb: [B, H, T, 1] -> [B, T, H]
+            emb = emb.squeeze(-1).permute(0, 2, 1)
+            return self.dec(emb, c0)
+
+    df_wrapper = DfDecWrapper(model.df_dec)
+    df_path = out_dir / "df_dec.onnx"
+    logger.info(f"  Exporting DF Decoder → {df_path.name}")
+    torch.onnx.export(
+        df_wrapper,
+        args=(emb, c0),
+        f=str(df_path),
+        input_names=["emb", "c0"],
+        output_names=["coefs"],
+        dynamic_axes={
+            "emb": {2: "S"},
+            "c0": {2: "S"},
+            "coefs": {2: "S"} # Will be B, C, S, 1
+        },
+        opset_version=opset,
+        export_params=True,
+        do_constant_folding=True,
+        dynamo=False,
+    )
+
+    # Simplify all
+    for p in [enc_path, erb_path, df_path]:
+        _simplify(p)
+
+    logger.info("Split export done.")
+
+
 def _simplify(out_path: Path) -> None:
     try:
         import onnx
@@ -240,6 +367,15 @@ def main() -> None:
         help="ONNX opset version (default: 18).",
     )
     parser.add_argument(
+        "--dfn-style", action="store_true",
+        help="Export split models (Encoder, ERB Decoder, DF Decoder) like DFN3. "
+             "Enables optimized streaming via tract-pulse.",
+    )
+    parser.add_argument(
+        "--wasm", action="store_true",
+        help="Target WASM/tract: force dynamo=False and opset <= 14.",
+    )
+    parser.add_argument(
         "--simplify", action="store_true",
         help="Run onnx-simplifier after export (requires: pip install onnxsim onnxruntime).",
     )
@@ -254,6 +390,8 @@ def main() -> None:
         config_path=Path(args.config),
         chunk_frames=args.chunk_frames,
         streaming=args.streaming,
+        dfn_style=args.dfn_style,
+        wasm=args.wasm,
         opset=args.opset,
         simplify=args.simplify,
     )

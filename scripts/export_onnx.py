@@ -1,27 +1,31 @@
 #!/usr/bin/env python3
 """Export a LightDeepFilterNet checkpoint to ONNX format.
 
-The exported model takes three inputs (spec, feat_erb, feat_spec) and returns
-four outputs (enhanced_spec, erb_mask, lsnr, df_coefs), matching the PyTorch
-forward signature exactly.
+Two export modes:
 
-Example:
-  uv run python -m scripts.export_onnx \\
-    --ckpt checkpoints/best.pt \\
-    --out checkpoints/lightdfn.onnx \\
-    --config src/configs/default.yaml
+  (default)  Chunked — causal, fixed T frames per call.
+    pad_feat look-ahead is removed so the model is fully causal and the ONNX
+    graph can be used in real-time pipelines without future-frame buffering.
 
-  # With onnxruntime verification:
-  uv run python -m scripts.export_onnx \\
-    --ckpt checkpoints/best.pt \\
-    --out checkpoints/lightdfn.onnx \\
-    --verify
+  --streaming  Python frame-by-frame inference.
+    T=1 per call; GRU hidden states and conv buffers are explicit ONNX I/O.
+    Used by scripts/infer_streaming_onnx.py.
 
-  # With onnx-simplifier post-processing:
-  uv run python -m scripts.export_onnx \\
-    --ckpt checkpoints/best.pt \\
-    --out checkpoints/lightdfn.onnx \\
-    --simplify
+Both modes use the dynamo-based exporter (opset 18) and support optional
+post-processing with onnx-simplifier (--simplify).
+
+Examples:
+  # Causal chunked export (default):
+  python scripts/export_onnx.py --ckpt checkpoints/best.pt \\
+      --out checkpoints/lightdfn.onnx --simplify
+
+  # Streaming export (opset 18, Python infer_streaming_onnx.py):
+  python scripts/export_onnx.py --ckpt checkpoints/best.pt \\
+      --out checkpoints/lightdfn_streaming.onnx --streaming --simplify
+
+  # Streaming export for WASM / tract (opset 14, dynamo=False):
+  python scripts/export_onnx.py --ckpt checkpoints/best.pt \\
+      --out checkpoints/lightdfn_streaming_wasm.onnx --streaming --wasm --simplify
 """
 
 from __future__ import annotations
@@ -30,6 +34,8 @@ import argparse
 from pathlib import Path
 
 import torch
+import torch.nn as nn
+from loguru import logger
 
 from src.configs.config import load_config
 from src.model.lightdeepfilternet import init_model
@@ -37,34 +43,21 @@ from src.model.streaming import StreamingLightDFN
 from src.utils.io import get_device
 
 
-def build_dummy_inputs(
+def _build_dummy_inputs(
     model_cfg,
     loader_cfg,
     T: int = 512,
     device: torch.device | str = "cpu",
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Build dummy input tensors matching the model's expected shapes.
-
-    Args:
-        model_cfg: ModelConfig with fft_size, nb_erb, etc.
-        loader_cfg: DataLoaderConfig with nb_spec.
-        T: Number of time frames to export. The ONNX model will only accept
-           exactly this many frames. Inference on longer audio should chunk
-           into T-frame segments. Default: 512 (~5 s at 48 kHz / hop 480).
-        device: Target device for tensors.
-
-    Returns:
-        (spec, feat_erb, feat_spec) dummy tensors.
-    """
     B = 1
-    F = model_cfg.fft_size // 2 + 1  # 481
-    E = model_cfg.nb_erb  # 32
-    Fc = loader_cfg.nb_spec  # 96
-
-    spec = torch.randn(B, 1, T, F, 2, device=device)
-    feat_erb = torch.randn(B, 1, T, E, device=device)
-    feat_spec = torch.randn(B, 1, T, Fc, 2, device=device)
-    return spec, feat_erb, feat_spec
+    F = model_cfg.fft_size // 2 + 1
+    E = model_cfg.nb_erb
+    Fc = loader_cfg.nb_spec
+    return (
+        torch.randn(B, 1, T, F, 2, device=device),
+        torch.randn(B, 1, T, E,    device=device),
+        torch.randn(B, 1, T, Fc, 2, device=device),
+    )
 
 
 def export(
@@ -73,16 +66,11 @@ def export(
     config_path: Path,
     chunk_frames: int = 512,
     streaming: bool = False,
+    wasm: bool = False,
     opset: int = 18,
-    verify: bool = False,
     simplify: bool = False,
 ) -> None:
-    model_cfg, _aug_cfg, loader_cfg, _train_cfg, _loss_cfg = load_config(
-        str(config_path)
-    )
-
-    # Li-GRU requires batch_size at construction; use 1 for export.
-    model_cfg.batch_size = 1
+    model_cfg, _aug, loader_cfg, _train, _loss = load_config(str(config_path))
 
     device = get_device()
     model = init_model(model_cfg).to(device)
@@ -92,209 +80,173 @@ def export(
     model.load_state_dict(state_dict, strict=True)
     model.eval()
 
+    # Remove look-ahead: pad_feat shifts features forward by conv_lookahead frames,
+    # which requires future audio — incompatible with causal/real-time inference.
+    # Replacing with Identity makes the model fully causal at a marginal quality cost.
+    if model_cfg.conv_lookahead > 0:
+        model.pad_feat = nn.Identity()
+
+    # WASM/tract target: force dynamo=False and opset ≤ 14 for full op compatibility.
+    # tract 0.21 supports GRU, Conv, Einsum, BatchNorm up to opset 14.
+    use_dynamo = not wasm
+    if wasm:
+        opset = min(opset, 14)
+        logger.info(f"WASM target: dynamo=False, opset capped at {opset}")
+
     if streaming:
-        _export_streaming(model, model_cfg, loader_cfg, out_path, opset, device)
+        _export_streaming(model, model_cfg, loader_cfg, out_path, opset)
     else:
-        _export_chunked(
-            model, model_cfg, loader_cfg, out_path, chunk_frames, opset, device
-        )
+        _export_chunked(model, model_cfg, loader_cfg, out_path, chunk_frames, opset)
 
-    _postprocess(out_path, simplify, verify)
+    if simplify:
+        _simplify(out_path)
+    _print_onnx_info(out_path)
 
 
-def _export_chunked(
-    model, model_cfg, loader_cfg, out_path, chunk_frames, opset, device
-):
-    """Export fixed-chunk model (processes chunk_frames STFT frames per call)."""
-    # NOTE: The LiGRU cell uses a Python for-loop over the time axis, which
-    # forces T to be a static constant in the exported graph.  We therefore
-    # export with a fixed chunk size; the inference script pads/chunks audio
-    # to match this size at runtime.
-    dummy_inputs = build_dummy_inputs(
-        model_cfg, loader_cfg, T=chunk_frames, device=device
-    )
-    spec, feat_erb, feat_spec = dummy_inputs
+def _export_chunked(model, model_cfg, loader_cfg, out_path, chunk_frames, opset):
+    device = next(model.parameters()).device
+    dummy = _build_dummy_inputs(model_cfg, loader_cfg, T=chunk_frames, device=device)
 
     with torch.no_grad():
-        out = model(spec, feat_erb, feat_spec)
-    print(f"PyTorch forward pass OK — outputs: {[list(o.shape) for o in out]}")
-    print(
-        f"Chunk size: {chunk_frames} frames  "
+        out = model(*dummy)
+    logger.info(f"PyTorch forward OK — outputs: {[list(o.shape) for o in out]}")
+    logger.info(
+        f"Chunk: {chunk_frames} frames "
         f"({chunk_frames * model_cfg.hop_size / model_cfg.sr:.2f} s at {model_cfg.sr} Hz)"
     )
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    print(f"Exporting to {out_path}  (opset={opset}) …")
+    logger.info(f"Exporting → {out_path}  (opset={opset}, dynamo=True) …")
     torch.onnx.export(
         model,
-        args=dummy_inputs,
+        args=dummy,
         f=str(out_path),
         input_names=["spec", "feat_erb", "feat_spec"],
         output_names=["enhanced_spec", "erb_mask", "lsnr", "df_coefs"],
         opset_version=opset,
         export_params=True,
-        dynamo=False,
+        keep_initializers_as_inputs=False,
+        external_data=False,
+        verify=False,
+        optimize=True,
+        dynamo=True,
     )
-    print("Export done.")
+    logger.info("Export done.")
 
 
-def _export_streaming(model, model_cfg, loader_cfg, out_path, opset, device):
-    """Export streaming model (T=1 per call, hidden states + conv buffers as explicit I/O)."""
+def _export_streaming(model, model_cfg, loader_cfg, out_path, opset):
+    device = next(model.parameters()).device
     wrapper = StreamingLightDFN(model)
     wrapper.eval()
 
-    dummy_frame = build_dummy_inputs(model_cfg, loader_cfg, T=1, device=device)
-    h_enc, h_erb, h_df, buf_erb0, buf_df0, buf_dfp, buf_spec = wrapper.init_states(
-        batch_size=1, device=device
-    )
+    dummy_frame = _build_dummy_inputs(model_cfg, loader_cfg, T=1, device=device)
+    h_enc, h_erb, h_df, buf_erb0, buf_df0, buf_dfp, buf_spec = wrapper.init_states(batch_size=1, device=device)
 
     with torch.no_grad():
-        out = wrapper(
-            *dummy_frame, h_enc, h_erb, h_df, buf_erb0, buf_df0, buf_dfp, buf_spec
-        )
-    print(f"Streaming forward pass OK — outputs: {[list(o.shape) for o in out]}")
-    print(
-        f"Streaming: 1 frame per call  "
-        f"({model_cfg.hop_size / model_cfg.sr * 1000:.1f} ms per call at {model_cfg.sr} Hz)"
+        out = wrapper(*dummy_frame, h_enc, h_erb, h_df, buf_erb0, buf_df0, buf_dfp, buf_spec)
+    logger.info(f"Streaming forward OK — outputs: {[list(o.shape) for o in out]}")
+    logger.info(
+        f"Streaming: 1 frame/call "
+        f"({model_cfg.hop_size / model_cfg.sr * 1000:.1f} ms/call at {model_cfg.sr} Hz)"
     )
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    print(f"Exporting to {out_path}  (opset={opset}, streaming=True) …")
+    logger.info(f"Exporting → {out_path}  (opset={opset}, dynamo=True) …")
     torch.onnx.export(
         wrapper,
         args=(*dummy_frame, h_enc, h_erb, h_df, buf_erb0, buf_df0, buf_dfp, buf_spec),
         f=str(out_path),
         input_names=[
-            "spec",
-            "feat_erb",
-            "feat_spec",
-            "h_enc",
-            "h_erb",
-            "h_df",
-            "buf_erb0",
-            "buf_df0",
-            "buf_dfp",
-            "buf_spec",
+            "spec", "feat_erb", "feat_spec",
+            "h_enc", "h_erb", "h_df",
+            "buf_erb0", "buf_df0", "buf_dfp", "buf_spec",
         ],
         output_names=[
             "enhanced_spec",
-            "h_enc_new",
-            "h_erb_new",
-            "h_df_new",
-            "buf_erb0_new",
-            "buf_df0_new",
-            "buf_dfp_new",
-            "buf_spec_new",
+            "h_enc_new", "h_erb_new", "h_df_new",
+            "buf_erb0_new", "buf_df0_new", "buf_dfp_new", "buf_spec_new",
         ],
         opset_version=opset,
         export_params=True,
-        dynamo=False,  # dynamo=True mis-traces Li-GRU's list-append hidden-state pattern,
-        # causing the output hidden states to be constants (not updated).
-        # Use the TorchScript-based exporter for correct state threading.
+        keep_initializers_as_inputs=False,
+        external_data=False,
+        verify=False,
+        optimize=True,
+        dynamo=True,
     )
-    print("Export done.")
+    logger.info("Export done.")
 
 
-def _postprocess(out_path, simplify, _verify):
-    # ------------------------------------------------------------------ #
-    # Optional: onnx-simplifier
-    # ------------------------------------------------------------------ #
-    if simplify:
-        try:
-            import onnx
-            import onnxsim
+def _simplify(out_path: Path) -> None:
+    try:
+        import onnx
+        import onnxsim
 
-            print("Running onnx-simplifier …")
-            model_onnx = onnx.load(str(out_path))
-            model_simplified, check = onnxsim.simplify(model_onnx)
-            if check:
-                onnx.save(model_simplified, str(out_path))
-                print("Simplification successful.")
-            else:
-                print("Warning: simplification check failed; keeping original.")
-        except (ImportError, Exception) as e:
-            print(
-                f"onnx-simplifier skipped ({e}); install with: pip install onnxsim onnxruntime"
-            )
+        logger.info(f"Simplifying {out_path.name} …")
+        m, check = onnxsim.simplify(onnx.load(str(out_path)))
+        if check:
+            onnx.save(m, str(out_path))
+            logger.info("Simplification OK.")
+        else:
+            logger.warning("Simplification check failed — keeping original.")
+    except ImportError:
+        logger.warning("onnxsim not found (pip install onnxsim onnxruntime), skipping.")
+    except Exception as e:
+        logger.warning(f"onnxsim error: {e} — keeping original.")
 
-    # ------------------------------------------------------------------ #
-    # Print model info
-    # ------------------------------------------------------------------ #
+
+def _print_onnx_info(out_path: Path) -> None:
     try:
         import onnx
 
         m = onnx.load(str(out_path))
         size_mb = out_path.stat().st_size / 1024 / 1024
-        print("\nONNX model info:")
-        print(f"  Path:    {out_path}")
-        print(f"  Size:    {size_mb:.1f} MB")
-        print(f"  Opset:   {m.opset_import[0].version}")
-        print(f"  Inputs:  {[n.name for n in m.graph.input]}")
-        print(f"  Outputs: {[n.name for n in m.graph.output]}")
+        logger.info(f"ONNX model: {out_path}")
+        logger.info(f"  Size:    {size_mb:.1f} MB")
+        logger.info(f"  Opset:   {m.opset_import[0].version}")
+        logger.info(f"  Inputs:  {[n.name for n in m.graph.input]}")
+        logger.info(f"  Outputs: {[n.name for n in m.graph.output]}")
     except ImportError:
         pass
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Export LightDeepFilterNet checkpoint to ONNX."
+        description="Export LightDeepFilterNet checkpoint to ONNX (causal, opset 18)."
     )
     parser.add_argument(
-        "--ckpt",
-        type=str,
-        default="checkpoints/best.pt",
-        help="Path to .pt checkpoint (default: checkpoints/best.pt)",
+        "--ckpt", type=str, default="checkpoints/best.pt",
+        help="Checkpoint path (default: checkpoints/best.pt)",
     )
     parser.add_argument(
-        "--out",
-        type=str,
-        default=None,
-        help="Output .onnx path (default: same dir as checkpoint, same stem + .onnx)",
+        "--out", type=str, default=None,
+        help="Output .onnx path (default: same dir/stem as --ckpt)",
     )
     parser.add_argument(
-        "--config",
-        type=str,
-        default="src/configs/default.yaml",
+        "--config", type=str, default="src/configs/default.yaml",
         help="Model config YAML (default: src/configs/default.yaml)",
     )
     parser.add_argument(
-        "--streaming",
-        action="store_true",
-        help="Export streaming model (T=1 per call, hidden states as I/O). "
-        "Processes one hop (480 samples) per call. "
-        "Ignores --chunk-frames.",
+        "--streaming", action="store_true",
+        help="Export streaming model (T=1/call, GRU + conv states as explicit I/O). "
+             "For scripts/infer_streaming_onnx.py.",
     )
     parser.add_argument(
-        "--chunk-frames",
-        type=int,
-        default=512,
-        help="Fixed time frames per chunk exported into the ONNX model "
-        "(default: 512 ≈ 5 s at 48 kHz / hop 480). "
-        "Inference script will pad/chunk audio to match this.",
+        "--chunk-frames", type=int, default=512,
+        help="Frames per chunk for chunked export (default: 512 ≈ 5 s at 48 kHz).",
     )
     parser.add_argument(
-        "--opset",
-        type=int,
-        default=18,
-        help="ONNX opset version (default: 18; dynamo exporter requires >= 18)",
+        "--opset", type=int, default=18,
+        help="ONNX opset version (default: 18).",
     )
     parser.add_argument(
-        "--verify",
-        action="store_true",
-        help="Verify exported model with onnxruntime (requires onnxruntime)",
-    )
-    parser.add_argument(
-        "--simplify",
-        action="store_true",
-        help="Run onnx-simplifier after export (requires onnxsim)",
+        "--simplify", action="store_true",
+        help="Run onnx-simplifier after export (requires: pip install onnxsim onnxruntime).",
     )
     args = parser.parse_args()
 
     ckpt_path = Path(args.ckpt)
-    if args.out is None:
-        out_path = ckpt_path.with_suffix(".onnx")
-    else:
-        out_path = Path(args.out)
+    out_path = Path(args.out) if args.out else ckpt_path.with_suffix(".onnx")
 
     export(
         ckpt_path=ckpt_path,
@@ -303,7 +255,6 @@ def main() -> None:
         chunk_frames=args.chunk_frames,
         streaming=args.streaming,
         opset=args.opset,
-        verify=args.verify,
         simplify=args.simplify,
     )
 

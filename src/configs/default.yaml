@@ -18,11 +18,11 @@ model:
   conv_kernel: [1, 3]
   convt_kernel: [1, 3]
   conv_kernel_inp: [3, 3]
-  emb_hidden_dim: 256
+  emb_hidden_dim: 128
   emb_num_layers: 3
   emb_gru_skip: "none"
   emb_gru_skip_enc: "none"
-  df_hidden_dim: 256
+  df_hidden_dim: 128
   df_num_layers: 2
   df_gru_skip: "groupedlinear"
   df_pathway_kernel_size_t: 5
@@ -33,7 +33,6 @@ model:
   mask_pf: false
   pf_beta: 0.02
   lsnr_dropout: false
-  batch_size: 1
 
 augmentation:
   p_remove_dc: 0.25

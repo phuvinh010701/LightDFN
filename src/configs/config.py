@@ -33,11 +33,11 @@ class ModelConfig:
     conv_kernel: tuple[int, int] = field(default_factory=lambda: (1, 3))
     convt_kernel: tuple[int, int] = field(default_factory=lambda: (1, 3))
     conv_kernel_inp: tuple[int, int] = field(default_factory=lambda: (3, 3))
-    emb_hidden_dim: int = 256
+    emb_hidden_dim: int = 128
     emb_num_layers: int = 3
     emb_gru_skip: str = "none"
     emb_gru_skip_enc: str = "none"
-    df_hidden_dim: int = 256
+    df_hidden_dim: int = 128
     df_num_layers: int = 2
     df_gru_skip: str = "groupedlinear"
     df_pathway_kernel_size_t: int = 5
@@ -48,9 +48,6 @@ class ModelConfig:
     mask_pf: bool = False
     pf_beta: float = 0.02
     lsnr_dropout: bool = False
-
-    # Li-GRU specific — should match DataLoaderConfig.batch_size at training time
-    batch_size: int = 1
 
 
 @dataclass

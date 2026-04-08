@@ -2,7 +2,7 @@
 """
 Run LightDeepFilterNet streaming ONNX inference (one hop = 480 samples per call).
 
-Uses the streaming model exported with --streaming flag, which exposes LiGRU
+Uses the streaming model exported with --streaming flag, which exposes GRU
 hidden states as explicit inputs/outputs and processes T=1 frame per call.
 
 Features (spec, feat_erb, feat_spec) are computed *per-frame* with running
@@ -224,24 +224,14 @@ def enhance_file(
     audio_buf = torch.zeros(1, overlap)  # [1, overlap]
 
     # ---- Process one audio chunk (hop samples) at a time ----
-    # GRU hidden states are reset every GRU_RESET_FRAMES to match the training
-    # distribution (model trained on ~300-frame clips with zero-init state).
-    # Without this reset the hidden state drifts for long audio, collapsing the
-    # ERB mask to near-zero and producing silence after ~4-5 s.
-    # Conv buffers (buf_*) are NOT reset so the causal conv context stays
-    # continuous across the reset boundary.
-    GRU_RESET_FRAMES = 512
+    # GRU hidden states are carried across the entire file (true streaming semantics).
+    # Conv buffers (buf_*) maintain causal context continuously.
+    LOG_EVERY = 500
 
     enhanced_specs: list[np.ndarray] = []
     t0 = time.time()
 
     for i in range(T_frames):
-        if i > 0 and i % GRU_RESET_FRAMES == 0:
-            state_enc = _zero_input("h_enc")
-            state_erb = _zero_input("h_erb")
-            state_df = _zero_input("h_df")
-
-        time_start = time.time()
         # Gather the next hop of new samples
         new_samples = x[:, i * hop : i * hop + hop]  # [1, hop]
 
@@ -289,9 +279,8 @@ def enhance_file(
         buf_dfp = outputs[6]
         buf_spec = outputs[7]
 
-        time_end = time.time()
-        if i % GRU_RESET_FRAMES == 0:
-            print(f"Frame {i}/{T_frames}  chunk_time={time_end - time_start:.4f}s")
+        if i % LOG_EVERY == 0:
+            print(f"Frame {i}/{T_frames}")
 
     elapsed = time.time() - t0
     audio_dur = total_samples / model_cfg.sr

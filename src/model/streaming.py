@@ -1,6 +1,6 @@
 """Streaming wrapper for LightDeepFilterNet single-frame ONNX inference.
 
-Exposes all LiGRU hidden states AND causal convolution buffers as explicit
+Exposes all GRU hidden states AND causal convolution buffers as explicit
 ONNX inputs/outputs so they can be threaded between consecutive hops in a
 real-time pipeline.
 
@@ -17,15 +17,15 @@ with explicit input buffers that carry the previous frames:
   buf_df0   : [1, 2,  2, nb_spec]   — input buffer for enc.df_conv0  (kt=3)
   buf_dfp   : [1, C,  4, nb_spec]   — input buffer for df_dec.df_convp (kt=5)
 
-Hidden state shapes (batch=1, by default):
+Hidden state shapes (batch=1, by default) — nn.GRU convention [num_layers, B, H]:
     h_enc : [enc_layers,  1, emb_hidden_dim]  (encoder emb_gru)
     h_erb : [erb_layers,  1, emb_hidden_dim]  (ERB-decoder emb_gru)
     h_df  : [df_layers,   1, df_hidden_dim]   (DF-decoder df_gru)
 
-With default config (emb_num_layers=3, df_num_layers=2, hidden=256):
-    h_enc : [1, 1, 256]
-    h_erb : [2, 1, 256]
-    h_df  : [2, 1, 256]
+With default config (emb_num_layers=3, df_num_layers=2, hidden=128):
+    h_enc : [1, 1, 128]
+    h_erb : [2, 1, 128]
+    h_df  : [2, 1, 128]
 """
 
 from __future__ import annotations
@@ -226,9 +226,9 @@ class StreamingLightDFN(nn.Module):
         self, batch_size: int = 1, device: torch.device | str = "cpu"
     ) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]:
         """Return zero-initialised (h_enc, h_erb, h_df, buf_erb0, buf_df0, buf_dfp, buf_spec)."""
-        enc_layers = len(self.model.enc.emb_gru.ligru.rnn)
-        erb_layers = len(self.model.erb_dec.emb_gru.ligru.rnn)
-        df_layers = len(self.model.df_dec.df_gru.ligru.rnn)
+        enc_layers = self.model.enc.emb_gru.gru.num_layers
+        erb_layers = self.model.erb_dec.emb_gru.gru.num_layers
+        df_layers = self.model.df_dec.df_gru.gru.num_layers
         emb_dim = self.model.enc.emb_gru.hidden_size
         df_dim = self.model.df_dec.df_gru.hidden_size
 

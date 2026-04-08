@@ -1,7 +1,8 @@
-"""LightDeepFilterNet implementation with Li-GRU instead of standard GRU.
+"""LightDeepFilterNet implementation with standard GRU replacing LiGRU.
 
 This module implements the LightDeepFilterNet architecture, a lightweight version
-based on DeepFilterNet3 that replaces all GRU layers with Li-GRU layers for improved efficiency.
+based on DeepFilterNet3. GRU hidden sizes are reduced to 128 (from 256) to
+offset the higher parameter count of standard GRU vs the previous LiGRU.
 """
 
 from functools import partial
@@ -20,7 +21,7 @@ from src.model.modules import (
     ConvTranspose2dNormAct,
     GroupedLinearEinsum,
     Mask,
-    SqueezedLiGRU_S,
+    SqueezedGRU_S,
 )
 from src.utils.erb import get_erb_filterbanks
 from src.utils.io import get_device
@@ -30,7 +31,7 @@ eps = 1e-12
 
 
 class LightEncoder(nn.Module):
-    """Encoder module with Li-GRU for LightDeepFilterNet.
+    """Encoder module with standard GRU for LightDeepFilterNet.
 
     Args:
         config (ModelConfig): Model architecture configuration.
@@ -102,7 +103,7 @@ class LightEncoder(nn.Module):
         else:
             raise NotImplementedError()
 
-        self.emb_gru = SqueezedLiGRU_S(
+        self.emb_gru = SqueezedGRU_S(
             self.emb_in_dim,
             self.emb_dim,
             output_size=self.emb_out_dim,
@@ -111,7 +112,6 @@ class LightEncoder(nn.Module):
             gru_skip_op=skip_op,
             linear_groups=config.lin_groups,
             linear_act_layer=partial(nn.ReLU, inplace=True),
-            batch_size=config.batch_size,
         )
         self.lsnr_fc = nn.Sequential(nn.Linear(self.emb_out_dim, 1), nn.Sigmoid())
         self.lsnr_scale = config.lsnr_max - config.lsnr_min
@@ -147,7 +147,7 @@ class LightEncoder(nn.Module):
 
 
 class LightErbDecoder(nn.Module):
-    """ERB Decoder module with Li-GRU for LightDeepFilterNet.
+    """ERB Decoder module with standard GRU for LightDeepFilterNet.
 
     Args:
         config (ModelConfig): Model architecture configuration.
@@ -177,7 +177,7 @@ class LightErbDecoder(nn.Module):
         else:
             raise NotImplementedError()
 
-        self.emb_gru = SqueezedLiGRU_S(
+        self.emb_gru = SqueezedGRU_S(
             self.emb_in_dim,
             self.emb_dim,
             output_size=self.emb_out_dim,
@@ -186,7 +186,6 @@ class LightErbDecoder(nn.Module):
             gru_skip_op=skip_op,
             linear_groups=config.lin_groups,
             linear_act_layer=partial(nn.ReLU, inplace=True),
-            batch_size=config.batch_size,
         )
         tconv_layer = partial(
             ConvTranspose2dNormAct,
@@ -276,7 +275,7 @@ class LightDfOutputReshapeMF(nn.Module):
 
 
 class LightDfDecoder(nn.Module):
-    """Deep Filtering Decoder with Li-GRU.
+    """Deep Filtering Decoder with standard GRU.
 
     Args:
         config (ModelConfig): Model architecture configuration.
@@ -302,14 +301,13 @@ class LightDfDecoder(nn.Module):
             layer_width, self.df_out_ch, fstride=1, kernel_size=(kt, 1)
         )
 
-        self.df_gru = SqueezedLiGRU_S(
+        self.df_gru = SqueezedGRU_S(
             self.emb_in_dim,
             self.emb_dim,
             num_layers=self.df_n_layers,
             batch_first=True,
             gru_skip_op=None,
             linear_act_layer=partial(nn.ReLU, inplace=True),
-            batch_size=config.batch_size,
         )
         config.df_gru_skip = config.df_gru_skip.lower()
         assert config.df_gru_skip in ("none", "identity", "groupedlinear")
@@ -412,10 +410,11 @@ class LightDeepFilteringModule(nn.Module):
 
 
 class LightDeepFilterNet(nn.Module):
-    """LightDeepFilterNet main model with Li-GRU.
+    """LightDeepFilterNet main model with standard GRU (hidden_size=128).
 
-    This is a lightweight version based on DeepFilterNet3 architecture,
-    replacing all GRU layers with Li-GRU layers for improved efficiency.
+    Lightweight version based on DeepFilterNet3.  GRU hidden sizes are halved
+    (256 → 128) relative to DeepFilterNet3 to keep the parameter budget low
+    while using the more widely-supported ``nn.GRU`` instead of Li-GRU.
     """
 
     run_df: Final[bool]
@@ -492,7 +491,7 @@ class LightDeepFilterNet(nn.Module):
         feat_spec: Tensor,
         atten_lim: Tensor | None = None,
     ) -> tuple[Tensor, Tensor, Tensor, Tensor]:
-        """Forward method of DeepFilterNet3 with Li-GRU.
+        """Forward pass for LightDeepFilterNet.
 
         Args:
             spec (Tensor): Spectrum of shape [B, 1, T, F, 2]

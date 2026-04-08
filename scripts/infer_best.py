@@ -59,7 +59,6 @@ def enhance_file(
     )
 
     device = get_device()
-    model_cfg.batch_size = 1  # Li-GRU expects/init batch size; input here is batch=1.
     model = init_model(model_cfg).to(device)
 
     ckpt = torch.load(str(ckpt_path), map_location=device)
@@ -145,8 +144,7 @@ def enhance_file(
         erb_chunk = feat_erb_norm[:, :, chunk_start:chunk_end]
         fspec_chunk = feat_spec[:, :, chunk_start:chunk_end]
 
-        # Pad last (possibly short) chunk to CHUNK_FRAMES so the LiGRU
-        # batch_size pre-allocation stays consistent.
+        # Pad the last (possibly short) chunk to CHUNK_FRAMES.
         if chunk_len < CHUNK_FRAMES:
             pad = CHUNK_FRAMES - chunk_len
             # F.pad order is (last_dim, 2nd_last, 3rd_last, …), each as (left, right).

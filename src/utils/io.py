@@ -74,3 +74,23 @@ def encode(
             return x.numpy().astype(dtype)
         case _:
             raise NotImplementedError(f"Codec '{codec}' not supported.")
+
+
+def as_complex(x: Tensor):
+    """Convert real tensor with last dim 2 to complex tensor."""
+    if torch.is_complex(x):
+        return x
+    if x.shape[-1] != 2:
+        raise ValueError(
+            f"Last dimension need to be of length 2 (re + im), but got {x.shape}"
+        )
+    if x.stride(-1) != 1:
+        x = x.contiguous()
+    return torch.view_as_complex(x)
+
+
+def as_real(x: Tensor):
+    """Convert complex tensor to real tensor."""
+    if torch.is_complex(x):
+        return torch.view_as_real(x)
+    return x

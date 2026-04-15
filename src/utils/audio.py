@@ -1,6 +1,9 @@
 import torch
 from torch import Tensor
 import numpy as np
+import torchaudio
+
+from src.utils.io import resample
 
 _EPS = 1e-10
 
@@ -205,3 +208,32 @@ def spectrogram_to_db(spec: Tensor, ref_db: float = 80.0) -> np.ndarray:
     mag_db = mag_db - mag_db.max()
     mag_db = mag_db.clamp(min=-ref_db)
     return mag_db.T.cpu().numpy()  # [F, T]
+
+
+def load_audio_mono_resampled(
+    audio_path: str, target_sr: int, resample_method: str = "kaiser_best"
+) -> tuple[Tensor, int]:
+    """Load audio, convert to mono, float32, and resample to ``target_sr``."""
+    audio, sr = torchaudio.load(audio_path)
+    if audio.dim() == 2 and audio.shape[0] > 1:
+        audio = audio.mean(dim=0, keepdim=True)
+    audio = audio.to(torch.float32)
+    if sr != target_sr:
+        audio = resample(audio, sr, target_sr, method=resample_method)
+        sr = target_sr
+    return audio, sr
+
+
+def save_audio_peak_normalized(
+    audio: Tensor,
+    out_path: str,
+    sample_rate: int,
+    eps: float = 1e-8,
+) -> None:
+    """Peak-normalize mono waveform and save as WAV."""
+    wav = audio.detach().cpu().numpy().astype(np.float32)
+    peak = float(np.max(np.abs(wav))) if wav.size else 0.0
+    if peak > 0:
+        wav = wav / max(peak, eps)
+    out = torch.from_numpy(wav).unsqueeze(0)
+    torchaudio.save(out_path, out, sample_rate)

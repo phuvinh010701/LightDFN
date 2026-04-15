@@ -51,6 +51,10 @@ class ModelConfig:
 
     # Li-GRU specific — should match DataLoaderConfig.batch_size at training time
     batch_size: int = 1
+    # Normalisation inside LiGRU cells: "batchnorm" (folds into affine scale/offset
+    # at export — zero normalisation cost in native Rust path) or "layernorm"
+    # (sequence-length-agnostic but adds per-step mean/var overhead).
+    ligru_normalization: str = "batchnorm"
 
 
 @dataclass

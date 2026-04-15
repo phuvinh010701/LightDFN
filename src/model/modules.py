@@ -9,26 +9,6 @@ from torch.nn.parameter import Parameter
 from typing_extensions import Final
 
 
-def as_complex(x: Tensor):
-    """Convert real tensor with last dim 2 to complex tensor."""
-    if torch.is_complex(x):
-        return x
-    if x.shape[-1] != 2:
-        raise ValueError(
-            f"Last dimension need to be of length 2 (re + im), but got {x.shape}"
-        )
-    if x.stride(-1) != 1:
-        x = x.contiguous()
-    return torch.view_as_complex(x)
-
-
-def as_real(x: Tensor):
-    """Convert complex tensor to real tensor."""
-    if torch.is_complex(x):
-        return torch.view_as_real(x)
-    return x
-
-
 class Add(nn.Module):
     def forward(self, a, b):
         return a + b
@@ -250,6 +230,7 @@ class SqueezedLiGRU_S(nn.Module):
         gru_skip_op: Optional[Callable[..., nn.Module]] = None,
         linear_act_layer: Callable[..., nn.Module] = nn.Identity,
         batch_size: int = 1,  # Added for Li-GRU
+        normalization: str = "layernorm",  # "layernorm" or "batchnorm"
     ):
         super().__init__()
         self.input_size = input_size
@@ -272,7 +253,7 @@ class SqueezedLiGRU_S(nn.Module):
             ),  # Dummy shape, will be adjusted dynamically
             num_layers=num_layers,
             nonlinearity="relu",
-            normalization="batchnorm",
+            normalization=normalization,
             bias=True,
             dropout=0.0,
             bidirectional=False,
@@ -302,6 +283,28 @@ class SqueezedLiGRU_S(nn.Module):
             x = x + self.gru_skip(input)
         return x, h_out
 
+    def step(self, input: Tensor, h: Optional[Tensor] = None) -> Tuple[Tensor, Tensor]:
+        """Single time-step forward for streaming (T=1) — no Python loop, ONNX-clean.
+
+        Arguments
+        ---------
+        input : Tensor
+            Input of shape ``[B, 1, input_size]``.
+        h : Tensor | None
+            Stacked hidden states of shape ``[num_layers, B, hidden_size]``.
+
+        Returns
+        -------
+        Tuple[Tensor, Tensor]
+            ``(output [B, 1, output_size], h_out [num_layers, B, hidden_size])``
+        """
+        x = self.linear_in(input)
+        x, h_out = self.ligru.step(x, hx=h)
+        x = self.linear_out(x)
+        if self.gru_skip is not None:
+            x = x + self.gru_skip(input)
+        return x, h_out
+
 
 @torch.jit.script
 def _ligru_cell_relu(
@@ -312,23 +315,19 @@ def _ligru_cell_relu(
 ) -> Tensor:
     """JIT-compiled LiGRU cell loop for ReLU activation.
 
-    Compiles the recurrent time-step loop to C++, eliminating Python dispatch
-    overhead (~300 iterations for a 3 s clip at 48 kHz / hop 480).
-
-    Uses list + stack instead of pre-allocated tensor with index_put_ so the
-    ONNX TorchScript exporter can convert the loop body to ONNX SequenceInsert /
-    ConcatFromSequence ops (opset >= 11) without hitting unsupported index_put_.
+    T is specialized to a constant at export time — dynamic T requires replacing
+    LiGRU with torch.nn.GRU. Use the streaming export (T=1) for production.
 
     Args:
         w:         Pre-computed input projection ``W * x``, shape ``[B, T, 2H]``.
         u_weight:  Recurrent weight matrix of shape ``[2H, H]``.
         drop_mask: Dropout mask broadcast-compatible with ``[B, H]``.
-        ht:        Initial hidden state, shape ``[B, H]`` (or ``[1, H]`` to broadcast).
+        ht:        Initial hidden state, shape ``[B, H]`` or ``[1, H]``.
 
     Returns:
         Full hidden-state sequence of shape ``[B, T, H]``.
     """
-    u_t = u_weight.t()  # pre-transpose once outside the loop
+    u_t = u_weight.t()
     out: list[Tensor] = []
     for k in range(w.shape[1]):
         gates = w[:, k] + ht @ u_t
@@ -361,6 +360,8 @@ class LiGRU_Layer(nn.Module):
         in no normalization.
     dropout : float
         It is the dropout factor (must be between 0 and 1).
+    bias: bool
+        If True, the additive bias b is adopted.
     bidirectional : bool
         if True, a bidirectional model that scans the sequence both
         right-to-left and left-to-right is used.
@@ -375,6 +376,7 @@ class LiGRU_Layer(nn.Module):
         dropout=0.0,
         nonlinearity="relu",
         normalization="batchnorm",
+        bias=True,
         bidirectional=False,
     ):
         super(LiGRU_Layer, self).__init__()
@@ -490,6 +492,32 @@ class LiGRU_Layer(nn.Module):
             hiddens.append(ht)
         return torch.stack(hiddens, dim=1)
 
+    def step(self, x: Tensor, hx: Optional[Tensor] = None) -> Tensor:
+        """Single time-step forward (T=1) — no Python loop, ONNX-clean.
+
+        Arguments
+        ---------
+        x : Tensor
+            Input of shape ``[B, 1, input_size]``.
+        hx : Tensor | None
+            Hidden state of shape ``[B, H]``. Pass ``None`` to use ``h_init``.
+
+        Returns
+        -------
+        Tensor
+            New hidden state of shape ``[B, H]``.
+        """
+        w = self.w(x[:, 0, :])  # [B, 2H]
+        if self.normalize:
+            w = self.norm(w)
+        ht = hx if hx is not None else self.h_init
+        u_t = self.u.weight.t()
+        gates = w + ht @ u_t
+        at, zt = gates.chunk(2, 1)
+        zt = torch.sigmoid(zt)
+        hcand = torch.relu(at) * self.drop_mask_te
+        return zt * ht + (1 - zt) * hcand  # [B, H]
+
     def _init_drop(self):
         """Initializes the recurrent dropout operation. To speed it up,
         the dropout masks are sampled in advance.
@@ -521,8 +549,6 @@ class LiGRU_Layer(nn.Module):
             self.drop_mask_cnt = self.drop_mask_cnt + self.batch_size
 
         else:
-            if self.drop_mask_te.device != w.device:
-                self.drop_mask_te = self.drop_mask_te.to(w.device)
             drop_mask = self.drop_mask_te
 
         return drop_mask
@@ -593,6 +619,7 @@ class LiGRU(nn.Module):
                 dropout=self.dropout,
                 nonlinearity=self.nonlinearity,
                 normalization=self.normalization,
+                bias=self.bias,
                 bidirectional=self.bidirectional,
             )
             rnn.append(rnn_lay)
@@ -636,12 +663,9 @@ class LiGRU(nn.Module):
             if self.bidirectional:
                 hx = hx.reshape(self.num_layers, self.batch_size * 2, self.hidden_size)
 
-        first_hx = hx[0] if hx is not None else None
-        x = self.rnn[0](x, hx=first_hx)
-        h_parts = [x[:, -1, :]]
-
-        for i in range(1, self.num_layers):
-            x = self.rnn[i](x, hx=hx[i] if hx is not None else None)
+        h_parts: list[Tensor] = []
+        for i, layer in enumerate(self.rnn):
+            x = layer(x, hx=hx[i] if hx is not None else None)
             h_parts.append(x[:, -1, :])
 
         h_last = torch.stack(h_parts, dim=0)  # [num_layers, B, H]
@@ -658,6 +682,32 @@ class LiGRU(nn.Module):
         # state-threading loop in the streaming inference script.
 
         return x, h_last
+
+    def step(
+        self, x: Tensor, hx: Optional[torch.Tensor] = None
+    ) -> Tuple[Tensor, Tensor]:
+        """Single time-step forward through all layers — no Python loop, ONNX-clean.
+
+        Arguments
+        ---------
+        x : Tensor
+            Input of shape ``[B, 1, input_size]``.
+        hx : Tensor | None
+            Stacked hidden states of shape ``[num_layers, B, H]``.
+
+        Returns
+        -------
+        Tuple[Tensor, Tensor]
+            ``(output [B, 1, H], h_last [num_layers, B, H])``
+        """
+        h_parts: list[Tensor] = []
+        x_next = x
+        for i, layer in enumerate(self.rnn):
+            ht = layer.step(x_next, hx=hx[i] if hx is not None else None)
+            h_parts.append(ht)
+            x_next = ht.unsqueeze(1)  # [B, 1, H]
+        h_last = torch.stack(h_parts, dim=0)  # [num_layers, B, H]
+        return x_next, h_last
 
 
 def rnn_init(module):

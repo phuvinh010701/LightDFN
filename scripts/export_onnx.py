@@ -17,20 +17,7 @@ Example:
     --out checkpoints/lightdfn.onnx \\
     --verify
 
-  # With onnx-simplifier + graph optimization + ORT format:
-  uv run python -m scripts.export_onnx \\
-    --ckpt checkpoints/best.pt \\
-    --out checkpoints/lightdfn.ort \\
-    --simplify --graph-opt --to-ort
-
-  # FP16 for WebGPU:
-  uv run python -m scripts.export_onnx \\
-    --ckpt checkpoints/best.pt \\
-    --out checkpoints/lightdfn_fp16.onnx \\
-    --fp16
 """
-
-from __future__ import annotations
 
 import argparse
 import logging
@@ -38,9 +25,15 @@ from pathlib import Path
 
 import torch
 
+from src.model.streaming import (
+    StreamingDfDecoder,
+    StreamingEncoder,
+    StreamingErbDecoder,
+)
+
+
 from src.configs.config import load_config
 from src.model.lightdeepfilternet import init_model
-from src.model.streaming import StreamingLightDFN
 from src.utils.io import get_device
 
 logger = logging.getLogger(__name__)
@@ -74,79 +67,6 @@ def build_dummy_inputs(
     feat_erb = torch.randn(B, 1, T, E, device=device)
     feat_spec = torch.randn(B, 1, T, Fc, 2, device=device)
     return spec, feat_erb, feat_spec
-
-
-def optimize_graph(input_path: Path, output_path: Path) -> None:
-    """Apply ONNX graph optimizations (constant folding, operator fusion, etc.)."""
-    import onnxruntime as ort
-
-    logger.info("Applying graph optimizations...")
-    sess_options = ort.SessionOptions()
-    sess_options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
-    sess_options.optimized_model_filepath = str(output_path)
-    _ = ort.InferenceSession(str(input_path), sess_options)
-
-    original_size = input_path.stat().st_size / 1024 / 1024
-    optimized_size = output_path.stat().st_size / 1024 / 1024
-    reduction = (1 - optimized_size / original_size) * 100
-    logger.info(
-        "Graph opt: %.2f MB → %.2f MB (%.1f%% reduction)",
-        original_size,
-        optimized_size,
-        reduction,
-    )
-
-
-def convert_fp16(input_path: Path, output_path: Path) -> None:
-    """Convert model to FP16 precision for GPU/WebGPU backends (~2x size reduction)."""
-    logger.info("Converting to FP16...")
-    try:
-        import onnx
-        from onnxruntime.transformers.float16 import convert_float_to_float16
-
-        model = onnx.load(str(input_path))
-        model_fp16 = convert_float_to_float16(
-            model, keep_io_types=True, disable_shape_infer=False
-        )
-        onnx.save(model_fp16, str(output_path))
-
-        original_size = input_path.stat().st_size / 1024 / 1024
-        fp16_size = output_path.stat().st_size / 1024 / 1024
-        reduction = (1 - fp16_size / original_size) * 100
-        logger.info(
-            "FP16: %.2f MB → %.2f MB (%.1f%% reduction)",
-            original_size,
-            fp16_size,
-            reduction,
-        )
-    except ImportError:
-        logger.warning(
-            "FP16 skipped: install onnxruntime-transformers (uv pip install onnxruntime-transformers)"
-        )
-        import shutil
-
-        shutil.copy(input_path, output_path)
-
-
-def convert_to_ort(input_path: Path, output_path: Path) -> None:
-    """Convert ONNX model to ORT format (faster loading, optimized serialization)."""
-    import onnxruntime as ort
-
-    logger.info("Converting to ORT format...")
-    sess_options = ort.SessionOptions()
-    sess_options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
-    sess_options.optimized_model_filepath = str(output_path)
-    _ = ort.InferenceSession(str(input_path), sess_options)
-
-    original_size = input_path.stat().st_size / 1024 / 1024
-    ort_size = output_path.stat().st_size / 1024 / 1024
-    reduction = (1 - ort_size / original_size) * 100
-    logger.info(
-        "ORT: %.2f MB → %.2f MB (%.1f%% reduction)",
-        original_size,
-        ort_size,
-        reduction,
-    )
 
 
 def verify_model(model_path: Path, reference_path: Path | None = None) -> None:
@@ -192,9 +112,6 @@ def export(
     opset: int = 18,
     verify: bool = False,
     simplify: bool = False,
-    graph_opt: bool = False,
-    fp16: bool = False,
-    to_ort: bool = False,
 ) -> None:
     model_cfg, _aug_cfg, loader_cfg, _train_cfg, _loss_cfg = load_config(
         str(config_path)
@@ -208,183 +125,226 @@ def export(
 
     ckpt = torch.load(str(ckpt_path), map_location=device, weights_only=True)
     state_dict = ckpt["model"] if isinstance(ckpt, dict) and "model" in ckpt else ckpt
-    model.load_state_dict(state_dict, strict=True)
+    model.load_state_dict(state_dict, strict=False)
     model.eval()
 
     if streaming:
         _export_streaming(model, model_cfg, loader_cfg, out_path, opset, device)
+        # Apply post-processing to each of the 3 exported models
+        # out_path may be a directory (e.g. "checkpoints/" or "checkpoints") or a file path;
+        # treat it as a directory when it has no .onnx suffix.
+        out_dir = out_path if out_path.suffix != ".onnx" else out_path.parent
+        for stem in ("enc", "erb_dec", "df_dec"):
+            postprocess(
+                out_dir / f"{stem}.onnx",
+                simplify=simplify,
+                verify=verify,
+            )
     else:
         _export_chunked(
             model, model_cfg, loader_cfg, out_path, chunk_frames, opset, device
         )
+        postprocess(
+            out_path,
+            simplify=simplify,
+            verify=verify,
+        )
 
-    _postprocess(
-        out_path,
-        simplify=simplify,
-        graph_opt=graph_opt,
-        fp16=fp16,
-        to_ort=to_ort,
-        verify=verify,
+
+def _export_streaming(model, model_cfg, loader_cfg, out_path, opset, device):
+    """Export 3 separate ONNX models following the DFN3 architecture.
+
+    Mirrors DeepFilterNet3's export.py split into enc / erb_dec / df_dec.
+    All DSP (STFT, ERB, normalisation, DF application) runs in the Rust/WASM
+    caller; these ONNX files contain only neural-network inference.
+
+    Output files (placed next to ``out_path``):
+        enc.onnx      — StreamingEncoder
+        erb_dec.onnx  — StreamingErbDecoder
+        df_dec.onnx   — StreamingDfDecoder
+    """
+    model.eval()
+
+    out_dir = out_path if out_path.suffix != ".onnx" else out_path.parent
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    enc_mod = StreamingEncoder(model).eval().to(device)
+    erb_dec_mod = StreamingErbDecoder(model).eval().to(device)
+    df_dec_mod = StreamingDfDecoder(model).eval().to(device)
+
+    nb_erb = model_cfg.nb_erb
+    nb_df = model_cfg.nb_df
+    conv_ch = model_cfg.conv_ch
+    emb_hidden = model_cfg.emb_hidden_dim
+    df_hidden = model_cfg.df_hidden_dim
+    kt_inp = model_cfg.conv_kernel_inp[0]  # 3 → buf depth 2
+    kt_dfp = model_cfg.df_pathway_kernel_size_t  # 5 → buf depth 4
+    df_order = model_cfg.df_order
+
+    # Read actual layer counts from the model, not config.
+    # SqueezedLiGRU_S may use num_layers != emb_num_layers (enc uses 1, dec uses emb_num_layers-1).
+    enc_layers = len(model.enc.emb_gru.ligru.rnn)
+    erb_layers = len(model.erb_dec.emb_gru.ligru.rnn)
+    df_layers = len(model.df_dec.df_gru.ligru.rnn)
+
+    # ---- Encoder ----
+    feat_erb_in = torch.randn(1, 1, 1, nb_erb, device=device)
+    feat_spec_in = torch.randn(1, 2, 1, nb_df, device=device)
+    buf_erb0 = torch.zeros(1, 1, kt_inp - 1, nb_erb, device=device)
+    buf_df0 = torch.zeros(1, 2, kt_inp - 1, nb_df, device=device)
+    h_enc = torch.zeros(enc_layers, 1, emb_hidden, device=device)
+
+    with torch.no_grad():
+        enc_out = enc_mod(feat_erb_in, feat_spec_in, buf_erb0, buf_df0, h_enc)
+    e0, e1, e2, e3, emb, c0 = enc_out[:6]
+    logger.info("Encoder forward OK — out shapes: %s", [list(t.shape) for t in enc_out])
+
+    enc_path = out_dir / "enc.onnx"
+    torch.onnx.export(
+        enc_mod,
+        (feat_erb_in, feat_spec_in, buf_erb0, buf_df0, h_enc),
+        enc_path,
+        input_names=["feat_erb", "feat_spec", "buf_erb0", "buf_df0", "h_enc"],
+        output_names=[
+            "e0",
+            "e1",
+            "e2",
+            "e3",
+            "emb",
+            "c0",
+            "lsnr",
+            "buf_erb0_new",
+            "buf_df0_new",
+            "h_enc_new",
+        ],
+        opset_version=opset,
+        dynamo=True,
+        optimize=True,
+        external_data=False,
     )
+    logger.info("Exported: %s", enc_path)
+
+    # ---- ERB decoder ----
+    h_erb = torch.zeros(erb_layers, 1, emb_hidden, device=device)
+
+    with torch.no_grad():
+        erb_out = erb_dec_mod(emb, e3, e2, e1, e0, h_erb)
+    logger.info(
+        "ERB decoder forward OK — out shapes: %s", [list(t.shape) for t in erb_out]
+    )
+
+    erb_path = out_dir / "erb_dec.onnx"
+    torch.onnx.export(
+        erb_dec_mod,
+        (emb, e3, e2, e1, e0, h_erb),
+        erb_path,
+        input_names=["emb", "e3", "e2", "e1", "e0", "h_erb"],
+        output_names=["mask", "h_erb_new"],
+        opset_version=opset,
+        dynamo=True,
+        optimize=True,
+        external_data=False,
+    )
+    logger.info("Exported: %s", erb_path)
+
+    # ---- DF decoder ----
+    buf_dfp = torch.zeros(1, conv_ch, kt_dfp - 1, nb_df, device=device)
+    h_df = torch.zeros(df_layers, 1, df_hidden, device=device)
+
+    with torch.no_grad():
+        df_out = df_dec_mod(emb, c0, buf_dfp, h_df)
+    logger.info(
+        "DF decoder forward OK — out shapes: %s", [list(t.shape) for t in df_out]
+    )
+    logger.info(
+        "  coefs shape: %s  (df_order=%d, nb_df=%d)",
+        list(df_out[0].shape),
+        df_order,
+        nb_df,
+    )
+
+    df_path = out_dir / "df_dec.onnx"
+    torch.onnx.export(
+        df_dec_mod,
+        (emb, c0, buf_dfp, h_df),
+        df_path,
+        input_names=["emb", "c0", "buf_dfp", "h_df"],
+        output_names=["coefs", "buf_dfp_new", "h_df_new"],
+        opset_version=opset,
+        dynamo=True,
+        optimize=True,
+        external_data=False,
+    )
+    logger.info("Exported: %s", df_path)
+    logger.info("Streaming export done — 3 models in %s", out_dir)
 
 
 def _export_chunked(
     model, model_cfg, loader_cfg, out_path, chunk_frames, opset, device
 ):
-    """Export fixed-chunk model (processes chunk_frames STFT frames per call)."""
-    # NOTE: The LiGRU cell uses a Python for-loop over the time axis, which
-    # forces T to be a static constant in the exported graph.  We therefore
-    # export with a fixed chunk size; the inference script pads/chunks audio
-    # to match this size at runtime.
-    dummy_inputs = build_dummy_inputs(
+    """Export fixed-chunk model (T=chunk_frames STFT frames per call).
+
+    LiGRU specializes T to a constant at export time — dynamic T is not
+    supported. Used for testing only; production uses --streaming.
+    """
+    spec, feat_erb, feat_spec = build_dummy_inputs(
         model_cfg, loader_cfg, T=chunk_frames, device=device
     )
-    spec, feat_erb, feat_spec = dummy_inputs
 
     with torch.no_grad():
-        out = model(spec, feat_erb, feat_spec)
-    logger.info("PyTorch forward pass OK — outputs: %s", [list(o.shape) for o in out])
+        spec_e, mask, lsnr, df_coefs, *_ = model(spec, feat_erb, feat_spec)
     logger.info(
-        "Chunk size: %d frames (%.2f s at %d Hz)",
+        "PyTorch forward OK — outputs: %s",
+        [list(o.shape) for o in (spec_e, mask, lsnr, df_coefs)],
+    )
+    logger.info(
+        "Chunk: %d frames (%.2f s at %d Hz)",
         chunk_frames,
         chunk_frames * model_cfg.hop_size / model_cfg.sr,
         model_cfg.sr,
     )
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    logger.info("Exporting to %s (opset=%d) …", out_path, opset)
+    logger.info("Exporting to %s (opset=%d, T=%d) …", out_path, opset, chunk_frames)
+
     torch.onnx.export(
         model,
-        args=dummy_inputs,
-        f=str(out_path),
+        (spec, feat_erb, feat_spec),
+        out_path,
         input_names=["spec", "feat_erb", "feat_spec"],
-        output_names=["enhanced_spec", "erb_mask", "lsnr", "df_coefs"],
+        output_names=["spec_e", "mask", "lsnr", "df_coefs", "h_enc", "h_erb", "h_df"],
         opset_version=opset,
-        export_params=True,
         dynamo=True,
         optimize=True,
-        verify=False,
-        keep_initializers_as_inputs=False,
+        external_data=False,
     )
     logger.info("Export done.")
 
 
-def _export_streaming(model, model_cfg, loader_cfg, out_path, opset, device):
-    """Export streaming model (T=1 per call, hidden states + conv buffers as explicit I/O)."""
-    wrapper = StreamingLightDFN(model)
-    wrapper.eval()
+def simplify_model(model_path: Path) -> None:
+    """Simplify the model using onnx-simplifier."""
+    import onnx
+    import onnxsim
 
-    dummy_frame = build_dummy_inputs(model_cfg, loader_cfg, T=1, device=device)
-    h_enc, h_erb, h_df, buf_erb0, buf_df0, buf_dfp, buf_spec = wrapper.init_states(
-        batch_size=1, device=device
-    )
+    logger.info("Simplifying model %s …", model_path)
+    model = onnx.load(str(model_path))
+    model_simplified, check = onnxsim.simplify(model)
 
-    with torch.no_grad():
-        out = wrapper(
-            *dummy_frame, h_enc, h_erb, h_df, buf_erb0, buf_df0, buf_dfp, buf_spec
-        )
-    logger.info("Streaming forward pass OK — outputs: %s", [list(o.shape) for o in out])
-    logger.info(
-        "Streaming: 1 frame per call (%.1f ms per call at %d Hz)",
-        model_cfg.hop_size / model_cfg.sr * 1000,
-        model_cfg.sr,
-    )
-
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    logger.info("Exporting to %s (opset=%d, streaming=True) …", out_path, opset)
-    torch.onnx.export(
-        wrapper,
-        args=(*dummy_frame, h_enc, h_erb, h_df, buf_erb0, buf_df0, buf_dfp, buf_spec),
-        f=str(out_path),
-        input_names=[
-            "spec",
-            "feat_erb",
-            "feat_spec",
-            "h_enc",
-            "h_erb",
-            "h_df",
-            "buf_erb0",
-            "buf_df0",
-            "buf_dfp",
-            "buf_spec",
-        ],
-        output_names=[
-            "enhanced_spec",
-            "h_enc_new",
-            "h_erb_new",
-            "h_df_new",
-            "buf_erb0_new",
-            "buf_df0_new",
-            "buf_dfp_new",
-            "buf_spec_new",
-        ],
-        opset_version=opset,
-        export_params=True,
-        dynamo=True,
-        optimize=True,
-        verify=False,
-        keep_initializers_as_inputs=False,
-    )
-    logger.info("Export done.")
+    if check:
+        onnx.save(model_simplified, str(model_path))
+        logger.info("Simplification successful.")
+    else:
+        logger.warning("Simplification check failed; keeping original.")
 
 
-def _postprocess(
+def postprocess(
     out_path: Path,
     simplify: bool = False,
-    graph_opt: bool = False,
-    fp16: bool = False,
-    to_ort: bool = False,
     verify: bool = False,
 ) -> None:
     # Optional: onnx-simplifier
     if simplify:
-        try:
-            import onnx
-            import onnxsim
-
-            logger.info("Running onnx-simplifier …")
-            model_onnx = onnx.load(str(out_path))
-            model_simplified, check = onnxsim.simplify(model_onnx)
-            if check:
-                onnx.save(model_simplified, str(out_path))
-                logger.info("Simplification successful.")
-            else:
-                logger.warning("Simplification check failed; keeping original.")
-        except (ImportError, Exception) as e:
-            logger.warning(
-                "onnx-simplifier skipped (%s); install with: pip install onnxsim onnxruntime",
-                e,
-            )
-
-    # Optional: graph optimization
-    if graph_opt:
-        import shutil
-
-        temp_path = out_path.with_suffix(".graph_opt.onnx")
-        try:
-            optimize_graph(out_path, temp_path)
-            shutil.copy(temp_path, out_path)
-        finally:
-            if temp_path.exists():
-                temp_path.unlink()
-
-    # Optional: FP16 conversion
-    if fp16:
-        import shutil
-
-        temp_path = out_path.with_suffix(".fp16.onnx")
-        try:
-            convert_fp16(out_path, temp_path)
-            shutil.copy(temp_path, out_path)
-        finally:
-            if temp_path.exists():
-                temp_path.unlink()
-
-    # Optional: convert to ORT format
-    if to_ort:
-        ort_path = out_path.with_suffix(".ort")
-        convert_to_ort(out_path, ort_path)
-        logger.info("ORT model saved: %s", ort_path)
+        simplify_model(out_path)
 
     # Print model info
     try:
@@ -464,21 +424,6 @@ def main() -> None:
         action="store_true",
         help="Run onnx-simplifier after export (requires onnxsim)",
     )
-    parser.add_argument(
-        "--graph-opt",
-        action="store_true",
-        help="Apply ONNX graph optimizations (constant folding, operator fusion, etc.)",
-    )
-    parser.add_argument(
-        "--fp16",
-        action="store_true",
-        help="Convert to FP16 precision (for GPU/WebGPU backends, ~2x size reduction)",
-    )
-    parser.add_argument(
-        "--to-ort",
-        action="store_true",
-        help="Also save an ORT-format copy alongside the ONNX output (faster loading)",
-    )
     args = parser.parse_args()
 
     ckpt_path = Path(args.ckpt)
@@ -496,9 +441,6 @@ def main() -> None:
         opset=args.opset,
         verify=args.verify,
         simplify=args.simplify,
-        graph_opt=args.graph_opt,
-        fp16=args.fp16,
-        to_ort=args.to_ort,
     )
 
 

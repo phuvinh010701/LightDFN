@@ -11,7 +11,7 @@ import torch.nn.functional as F
 from torch import Tensor, nn
 
 from src.configs.config import LossConfig
-from src.model.modules import as_complex, as_real
+from src.utils.io import as_complex, as_real
 
 
 class _Angle(torch.autograd.Function):

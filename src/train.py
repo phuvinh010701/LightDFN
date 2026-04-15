@@ -97,7 +97,7 @@ def run_epoch(
 
             # Val uses a clone so the spec tensor is not modified in-place by the model
             model_input = spec_noisy if is_train else spec_noisy.clone()
-            enhanced, mask, lsnr, _ = model(model_input, feat_erb, feat_spec)
+            enhanced, mask, lsnr, _, _, _, _ = model(model_input, feat_erb, feat_spec)
 
             snrs = batch.snr.float().to(device, non_blocking=True)
             max_freq = batch.max_freq.to(device, non_blocking=True)
@@ -265,7 +265,9 @@ def eval_audio_samples(
             spec_noisy, spec_clean, feat_erb, feat_spec = prepare_batch(
                 batch, fft_size, hop_size, window, device
             )
-            enhanced, _mask, _lsnr, _ = model(spec_noisy.clone(), feat_erb, feat_spec)
+            enhanced, _mask, _lsnr, _, _, _, _ = model(
+                spec_noisy.clone(), feat_erb, feat_spec
+            )
 
             batch_snrs = batch.snr.tolist()
             n = min(num_samples - logged, spec_noisy.shape[0])

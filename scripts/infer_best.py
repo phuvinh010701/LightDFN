@@ -5,46 +5,25 @@ Run LightDeepFilterNet inference on a single audio file.
 Example:
   python3 scripts/infer_best.py \
     --ckpt checkpoints/best.pt \
-    --audio datasets/tests/audio-file.mp3 \
-    --out datasets/tests/audio-file_enhanced.wav
+    --audio datasets/tests/noisy.mp3 \
+    --out datasets/tests/noisy_enhanced.wav
 """
 
 import argparse
 from pathlib import Path
 
-import numpy as np
 import torch
-import torchaudio
 
 from src.configs.config import load_config
 from src.dataloader.fft import _norm_alpha, _running_mean_norm_erb, _running_unit_norm
 from src.model.lightdeepfilternet import init_model
-from src.utils.io import get_device, resample
-
-
-def _spec_to_audio(
-    spec: torch.Tensor, fft_size: int, hop_size: int, window: torch.Tensor
-) -> torch.Tensor:
-    """Reconstruct waveform from complex spectrogram tensor.
-
-    Args:
-        spec: Shape [B, 1, T_frames, F, 2] real/imag.
-    Returns:
-        Waveform: [B, T_samples]
-    """
-    # [B, 1, T, F, 2] -> complex [B, T, F] -> [B, F, T]
-    spec_c = torch.view_as_complex(spec[:, 0].contiguous())  # [B, T, F]
-    spec_c = spec_c.permute(0, 2, 1)  # [B, F, T]
-    B = spec_c.shape[0]
-    audio = torch.istft(
-        spec_c.reshape(B, spec_c.shape[-2], spec_c.shape[-1]),
-        n_fft=fft_size,
-        hop_length=hop_size,
-        win_length=fft_size,
-        window=window,
-        center=True,
-    )
-    return audio
+from src.utils.audio import (
+    compute_stft,
+    load_audio_mono_resampled,
+    save_audio_peak_normalized,
+    spec_to_audio,
+)
+from src.utils.io import get_device
 
 
 @torch.no_grad()
@@ -59,7 +38,7 @@ def enhance_file(
     )
 
     device = get_device()
-    model_cfg.batch_size = 1  # Li-GRU expects/init batch size; input here is batch=1.
+    model_cfg.batch_size = 1
     model = init_model(model_cfg).to(device)
 
     ckpt = torch.load(str(ckpt_path), map_location=device)
@@ -70,100 +49,41 @@ def enhance_file(
     if not audio_path.exists():
         raise FileNotFoundError(str(audio_path))
 
-    # torchaudio needs ffmpeg support for mp3 in most environments.
-    audio, sr = torchaudio.load(str(audio_path))
-    if audio.dim() == 2 and audio.shape[0] > 1:
-        audio = audio.mean(dim=0, keepdim=True)  # mono
-    audio = audio.to(torch.float32)
+    audio, sr = load_audio_mono_resampled(str(audio_path), model_cfg.sr)
 
-    if sr != model_cfg.sr:
-        audio = resample(audio, sr, model_cfg.sr, method="kaiser_best")
-        sr = model_cfg.sr
-
-    # Model expects [B, C, T]
     x = audio.unsqueeze(0).to(device)  # [1, 1, T]
     window = torch.hann_window(model_cfg.fft_size, device=device)
 
-    # --- STFT (center=False) ---
-    # Result: complex [C, F, T_frames]
-    stft = torch.stft(
-        x.reshape(-1, x.shape[-1]),  # [B*C, T]
-        n_fft=model_cfg.fft_size,
-        hop_length=model_cfg.hop_size,
-        win_length=model_cfg.fft_size,
-        window=window,
-        return_complex=True,
-        center=False,
-    )
-    # [B*C, F, T_frames] -> [B, C, F, T_frames] then to [B, C, T, F] layouts.
-    B = x.shape[0]
-    C = x.shape[1]
-    F_bins, T_frames = stft.shape[-2], stft.shape[-1]
-    stft = stft.view(B, C, F_bins, T_frames)  # [B, 1, F, T_frames]
+    spec_noisy = compute_stft(
+        x, model_cfg.fft_size, model_cfg.hop_size, window
+    )  # [B, C, T, F, 2]
+    stft = torch.view_as_complex(spec_noisy.contiguous()).permute(
+        0, 1, 3, 2
+    )  # [B, C, F, T]
 
-    # spec input to model: [B, 1, T_frames, F, 2]
-    spec_noisy = torch.view_as_real(
-        stft.permute(0, 1, 3, 2).contiguous()
-    )  # [B, 1, T, F, 2]
-
-    # --- Compute ERB features (match FftDataset) ---
-    # power: [B, C, F, T]
-    power = stft.abs().pow(2)
-    # feat_erb_db: [B, C, T, E]
-    erb_fb = model.erb_fb.to(device=device, dtype=power.dtype)  # [F, E]
+    # ERB features
+    erb_fb = model.erb_fb.to(device=device, dtype=stft.real.dtype)  # [F, E]
+    power = stft.abs().pow(2)  # [B, C, F, T]
     feat_erb = power.permute(0, 1, 3, 2) @ erb_fb  # [B, C, T, E]
-    feat_erb_db = (feat_erb + 1e-10).log10() * 10.0
+    feat_erb_db = (feat_erb + 1e-10).log10() * 10.0  # [B, C, T, E]
 
     alpha = _norm_alpha(model_cfg.sr, model_cfg.hop_size, model_cfg.norm_tau)
     feat_erb_norm = _running_mean_norm_erb(feat_erb_db.squeeze(1), alpha).unsqueeze(
         1
     )  # [B, 1, T, E]
 
-    # --- Compute complex normalized spec features (feat_spec) ---
-    nb_spec = loader_cfg.nb_spec
-    spec_slice = stft[:, :, :nb_spec, :]  # [B, C, F', T]
-    # _running_unit_norm expects [C, F', T]
-    spec_slice = spec_slice.squeeze(1)  # [B, F', T]
-    spec_normed = _running_unit_norm(spec_slice, alpha)  # complex [B, F', T]
-    feat_spec_c = spec_normed.permute(0, 2, 1).contiguous()  # [B, T, F']
-    feat_spec = torch.view_as_real(feat_spec_c).unsqueeze(1)  # [B, 1, T, F', 2]
+    # Spec features
+    spec_slice = stft[:, :, : loader_cfg.nb_spec, :].squeeze(1)  # [B, F', T]
+    spec_normed = _running_unit_norm(spec_slice, alpha)  # [B, F', T] complex
+    feat_spec = torch.view_as_real(spec_normed.permute(0, 2, 1).contiguous()).unsqueeze(
+        1
+    )  # [B, 1, T, F', 2]
 
-    # --- Forward (chunked to avoid GRU state drift beyond training window) ---
-    # The model is trained on short clips (~3 s = ~300 frames).  Processing the
-    # full sequence in one shot causes the GRU hidden state to drift far outside
-    # the training distribution, producing near-silent output after a few seconds.
-    # We therefore process in CHUNK_FRAMES-sized windows (matching the ONNX
-    # chunked export) with zero hidden-state reset between chunks, exactly
-    # matching the training regime.
-    CHUNK_FRAMES = 512
-    enhanced_chunks: list[torch.Tensor] = []
-    for chunk_start in range(0, T_frames, CHUNK_FRAMES):
-        chunk_end = min(chunk_start + CHUNK_FRAMES, T_frames)
-        chunk_len = chunk_end - chunk_start
+    # Forward pass on the full sequence
+    enhanced_spec, *_ = model(spec_noisy, feat_erb_norm, feat_spec)
 
-        spec_chunk = spec_noisy[:, :, chunk_start:chunk_end]
-        erb_chunk = feat_erb_norm[:, :, chunk_start:chunk_end]
-        fspec_chunk = feat_spec[:, :, chunk_start:chunk_end]
-
-        # Pad last (possibly short) chunk to CHUNK_FRAMES so the LiGRU
-        # batch_size pre-allocation stays consistent.
-        if chunk_len < CHUNK_FRAMES:
-            pad = CHUNK_FRAMES - chunk_len
-            # F.pad order is (last_dim, 2nd_last, 3rd_last, …), each as (left, right).
-            # spec_chunk [B, 1, T, F, 2]: pad T (3rd-from-last) → 6 values
-            spec_chunk = torch.nn.functional.pad(spec_chunk, (0, 0, 0, 0, 0, pad))
-            # erb_chunk [B, 1, T, E]: pad T (2nd-from-last) → 4 values
-            erb_chunk = torch.nn.functional.pad(erb_chunk, (0, 0, 0, pad))
-            # fspec_chunk [B, 1, T, F', 2]: pad T (3rd-from-last) → 6 values
-            fspec_chunk = torch.nn.functional.pad(fspec_chunk, (0, 0, 0, 0, 0, pad))
-
-        enh_chunk, _, _, _ = model(spec_chunk, erb_chunk, fspec_chunk)
-        enhanced_chunks.append(enh_chunk[:, :, :chunk_len])  # trim padding
-
-    enhanced_spec = torch.cat(enhanced_chunks, dim=2)
-
-    # --- Back to waveform ---
-    enhanced = _spec_to_audio(
+    # Back to waveform
+    enhanced = spec_to_audio(
         enhanced_spec.nan_to_num(nan=0.0, posinf=0.0, neginf=0.0),
         model_cfg.fft_size,
         model_cfg.hop_size,
@@ -171,20 +91,15 @@ def enhance_file(
     )
     enhanced = enhanced.squeeze(0).detach().cpu()
 
-    # Trim/pad to original length (torch.istft with center=True can extend).
+    # Trim/pad to original length
     target_len = x.shape[-1]
     if enhanced.numel() > target_len:
         enhanced = enhanced[:target_len]
     elif enhanced.numel() < target_len:
         enhanced = torch.nn.functional.pad(enhanced, (0, target_len - enhanced.numel()))
 
-    wav = enhanced.numpy().astype(np.float32)
-    peak = float(np.max(np.abs(wav))) if wav.size else 0.0
-    if peak > 0:
-        wav = wav / max(peak, 1e-8)
-
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    torchaudio.save(str(out_path), torch.from_numpy(wav).unsqueeze(0), sr)
+    save_audio_peak_normalized(enhanced, str(out_path), sr)
 
 
 def main() -> None:

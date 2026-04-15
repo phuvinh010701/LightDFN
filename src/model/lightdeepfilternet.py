@@ -112,23 +112,31 @@ class LightEncoder(nn.Module):
             linear_groups=config.lin_groups,
             linear_act_layer=partial(nn.ReLU, inplace=True),
             batch_size=config.batch_size,
+            normalization=config.ligru_normalization,
         )
         self.lsnr_fc = nn.Sequential(nn.Linear(self.emb_out_dim, 1), nn.Sigmoid())
         self.lsnr_scale = config.lsnr_max - config.lsnr_min
         self.lsnr_offset = config.lsnr_min
 
     def forward(
-        self, feat_erb: Tensor, feat_spec: Tensor
-    ) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]:
+        self,
+        feat_erb: Tensor,
+        feat_spec: Tensor,
+        h_enc: Tensor | None = None,
+    ) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]:
         """Encode ERB and complex spectrogram features into embeddings and LSNR estimate.
 
         Args:
             feat_erb (Tensor): ERB features in dB scale, shape ``[B, 1, T, Fe]``.
             feat_spec (Tensor): Complex spectrogram features, shape ``[B, 2, T, Fc]``.
+            h_enc (Tensor | None): Initial hidden state for the encoder GRU,
+                shape ``[enc_layers, B, emb_hidden_dim]``.  Pass ``None`` to
+                zero-initialise (matches original behaviour).
 
         Returns:
-            tuple[Tensor, ...]: ``(e0, e1, e2, e3, emb, c0, lsnr)`` encoder activations
-            and local SNR estimate of shape ``[B, T, 1]``.
+            tuple[Tensor, ...]: ``(e0, e1, e2, e3, emb, c0, lsnr, h_enc_new)``
+            encoder activations, local SNR estimate of shape ``[B, T, 1]``, and
+            the final encoder hidden state for carry-forward across chunks.
         """
         e0 = self.erb_conv0(feat_erb)  # [B, C, T, F]
         e1 = self.erb_conv1(e0)  # [B, C*2, T, F/2]
@@ -141,9 +149,9 @@ class LightEncoder(nn.Module):
         cemb = self.df_fc_emb(cemb)  # [B, T, C * F/4]
         emb = e3.permute(0, 2, 3, 1).flatten(2)  # [B, T, C * F]
         emb = self.combine(emb, cemb)
-        emb, _ = self.emb_gru(emb)  # [B, T, -1]
+        emb, h_enc_new = self.emb_gru(emb, h=h_enc)  # [B, T, -1]
         lsnr = self.lsnr_fc(emb) * self.lsnr_scale + self.lsnr_offset
-        return e0, e1, e2, e3, emb, c0, lsnr
+        return e0, e1, e2, e3, emb, c0, lsnr, h_enc_new
 
 
 class LightErbDecoder(nn.Module):
@@ -187,6 +195,7 @@ class LightErbDecoder(nn.Module):
             linear_groups=config.lin_groups,
             linear_act_layer=partial(nn.ReLU, inplace=True),
             batch_size=config.batch_size,
+            normalization=config.ligru_normalization,
         )
         tconv_layer = partial(
             ConvTranspose2dNormAct,
@@ -217,8 +226,14 @@ class LightErbDecoder(nn.Module):
         )
 
     def forward(
-        self, emb: Tensor, e3: Tensor, e2: Tensor, e1: Tensor, e0: Tensor
-    ) -> Tensor:
+        self,
+        emb: Tensor,
+        e3: Tensor,
+        e2: Tensor,
+        e1: Tensor,
+        e0: Tensor,
+        h_erb: Tensor | None = None,
+    ) -> tuple[Tensor, Tensor]:
         """Decode encoder activations into an ERB gain mask.
 
         Args:
@@ -227,18 +242,22 @@ class LightErbDecoder(nn.Module):
             e2 (Tensor): Encoder skip connection at stride 2, shape ``[B, C, T, F/2]``.
             e1 (Tensor): Encoder skip connection at stride 1, shape ``[B, C, T, F]``.
             e0 (Tensor): Encoder input features, shape ``[B, C, T, F]``.
+            h_erb (Tensor | None): Initial hidden state for the ERB decoder GRU,
+                shape ``[erb_layers, B, emb_hidden_dim]``.  Pass ``None`` to
+                zero-initialise (matches original behaviour).
 
         Returns:
-            Tensor: ERB gain mask of shape ``[B, 1, T, nb_erb]``.
+            tuple[Tensor, Tensor]: ERB gain mask of shape ``[B, 1, T, nb_erb]`` and
+            the final ERB decoder hidden state for carry-forward across chunks.
         """
         b, _, t, f8 = e3.shape
-        emb, _ = self.emb_gru(emb)
+        emb, h_erb_new = self.emb_gru(emb, h=h_erb)
         emb = emb.view(b, t, f8, -1).permute(0, 3, 1, 2)  # [B, C*8, T, F/8]
         e3 = self.convt3(self.conv3p(e3) + emb)  # [B, C*4, T, F/4]
         e2 = self.convt2(self.conv2p(e2) + e3)  # [B, C*2, T, F/2]
         e1 = self.convt1(self.conv1p(e1) + e2)  # [B, C, T, F]
         m = self.conv0_out(self.conv0p(e0) + e1)  # [B, 1, T, F]
-        return m
+        return m, h_erb_new
 
 
 class LightDfOutputReshapeMF(nn.Module):
@@ -310,6 +329,7 @@ class LightDfDecoder(nn.Module):
             gru_skip_op=None,
             linear_act_layer=partial(nn.ReLU, inplace=True),
             batch_size=config.batch_size,
+            normalization=config.ligru_normalization,
         )
         config.df_gru_skip = config.df_gru_skip.lower()
         assert config.df_gru_skip in ("none", "identity", "groupedlinear")
@@ -334,24 +354,34 @@ class LightDfDecoder(nn.Module):
         )
         self.df_out = nn.Sequential(df_out, nn.Tanh())
 
-    def forward(self, emb: Tensor, c0: Tensor) -> Tensor:
+    def forward(
+        self,
+        emb: Tensor,
+        c0: Tensor,
+        h_df: Tensor | None = None,
+    ) -> tuple[Tensor, Tensor]:
         """Compute per-frequency DF filter coefficients.
 
         Args:
             emb (Tensor): Shared encoder embedding, shape ``[B, T, emb_dim]``.
             c0 (Tensor): DF pathway conv features, shape ``[B, C, T, Fc]``.
+            h_df (Tensor | None): Initial hidden state for the DF decoder GRU,
+                shape ``[df_layers, B, df_hidden_dim]``.  Pass ``None`` to
+                zero-initialise (matches original behaviour).
 
         Returns:
-            Tensor: DF coefficients of shape ``[B, T, nb_df, df_order*2]``.
+            tuple[Tensor, Tensor]: DF coefficients of shape
+            ``[B, T, nb_df, df_order*2]`` and the final DF decoder hidden state
+            for carry-forward across chunks.
         """
         b, t, _ = emb.shape
-        c, _ = self.df_gru(emb)  # [B, T, H], H: df_n_hidden
+        c, h_df_new = self.df_gru(emb, h=h_df)  # [B, T, H], H: df_n_hidden
         if self.df_skip is not None:
             c = c + self.df_skip(emb)
         c0 = self.df_convp(c0).permute(0, 2, 3, 1)  # [B, T, F, O*2], channels_last
         c = self.df_out(c)  # [B, T, F*O*2], O: df_order
         c = c.view(b, t, self.df_bins, self.df_out_ch) + c0  # [B, T, F, O*2]
-        return c
+        return c, h_df_new
 
 
 class LightDeepFilteringModule(nn.Module):
@@ -456,12 +486,6 @@ class LightDeepFilterNet(nn.Module):
             )
         else:
             self.pad_feat = nn.Identity()
-        if config.df_lookahead > 0:
-            self.pad_spec = nn.ConstantPad3d(
-                (0, 0, 0, 0, -config.df_lookahead, config.df_lookahead), 0.0
-            )
-        else:
-            self.pad_spec = nn.Identity()
 
         # Initialize ERB filterbanks if not provided
         self.register_buffer("erb_fb", erb_fb_tensor)
@@ -492,8 +516,11 @@ class LightDeepFilterNet(nn.Module):
         feat_erb: Tensor,
         feat_spec: Tensor,
         atten_lim: Tensor | None = None,
-    ) -> tuple[Tensor, Tensor, Tensor, Tensor]:
-        """Forward method of DeepFilterNet3 with Li-GRU.
+        h_enc: Tensor | None = None,
+        h_erb: Tensor | None = None,
+        h_df: Tensor | None = None,
+    ) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]:
+        """Forward method of LightDeepFilterNet with Li-GRU.
 
         Args:
             spec (Tensor): Spectrum of shape [B, 1, T, F, 2]
@@ -502,18 +529,28 @@ class LightDeepFilterNet(nn.Module):
             atten_lim (Tensor | None): Per-sample attenuation limit in dB, shape [B].
                 Clamps the ERB mask from below so suppression never exceeds this limit.
                 E.g. 12 dB means at most 12 dB of noise suppression.
+            h_enc (Tensor | None): Encoder GRU hidden state ``[enc_layers, B, emb_dim]``.
+                Pass ``None`` to zero-initialise (first chunk / standalone call).
+            h_erb (Tensor | None): ERB decoder GRU hidden state ``[erb_layers, B, emb_dim]``.
+                Pass ``None`` to zero-initialise.
+            h_df (Tensor | None): DF decoder GRU hidden state ``[df_layers, B, df_dim]``.
+                Pass ``None`` to zero-initialise.
 
         Returns:
-            spec (Tensor): Enhanced spectrum of shape [B, 1, T, F, 2]
-            m (Tensor): ERB mask estimate of shape [B, 1, T, E]
-            lsnr (Tensor): Local SNR estimate of shape [B, T, 1]
-            df_coefs (Tensor): DF coefficients
+            tuple of 7 tensors:
+            - spec (Tensor): Enhanced spectrum of shape [B, 1, T, F, 2]
+            - m (Tensor): ERB mask estimate of shape [B, 1, T, E]
+            - lsnr (Tensor): Local SNR estimate of shape [B, T, 1]
+            - df_coefs (Tensor): DF coefficients
+            - h_enc_new (Tensor): Updated encoder hidden state
+            - h_erb_new (Tensor): Updated ERB decoder hidden state
+            - h_df_new (Tensor): Updated DF decoder hidden state
         """
         feat_spec = feat_spec.squeeze(1).permute(0, 3, 1, 2)
 
         feat_erb = self.pad_feat(feat_erb)
         feat_spec = self.pad_feat(feat_spec)
-        e0, e1, e2, e3, emb, c0, lsnr = self.enc(feat_erb, feat_spec)
+        e0, e1, e2, e3, emb, c0, lsnr, h_enc_new = self.enc(feat_erb, feat_spec, h_enc)
 
         # LSNR dropout: skip processing for low SNR frames
         use_lsnr_dropout = self.lsnr_dropout and self.training
@@ -533,30 +570,31 @@ class LightDeepFilterNet(nn.Module):
 
         if self.run_erb:
             if use_lsnr_dropout:
-                m[:, :, idcs] = self.erb_dec(emb, e3, e2, e1, e0)
+                m_out, h_erb_new = self.erb_dec(emb, e3, e2, e1, e0, h_erb)
+                m[:, :, idcs] = m_out
                 spec_m = self.mask(spec, m, atten_lim)
             else:
-                m = self.erb_dec(emb, e3, e2, e1, e0)
+                m, h_erb_new = self.erb_dec(emb, e3, e2, e1, e0, h_erb)
                 spec_m = self.mask(spec, m, atten_lim)
         else:
             m = torch.zeros((), device=spec.device)
+            h_erb_new = h_erb  # no-op: pass through unchanged
             spec_m = torch.zeros_like(spec)
 
         if self.run_df:
             if use_lsnr_dropout:
-                df_coefs[:, idcs] = self.df_dec(emb, c0)
+                df_coefs_out, h_df_new = self.df_dec(emb, c0, h_df)
+                df_coefs[:, idcs] = df_coefs_out
             else:
-                df_coefs = self.df_dec(emb, c0)
+                df_coefs, h_df_new = self.df_dec(emb, c0, h_df)
             df_coefs = self.df_out_transform(df_coefs)
             spec_e = self.df_op(spec, df_coefs)
-            # Replace in-place index assignment (creates onnx::Placeholder /
-            # index_put_ which is not supported by the TorchScript ONNX exporter)
-            # with a functional torch.cat over the frequency axis.
             spec_e = torch.cat(
                 [spec_e[..., : self.nb_df, :], spec_m[..., self.nb_df :, :]], dim=-2
             )
         else:
             df_coefs = torch.zeros((), device=spec.device)
+            h_df_new = h_df  # no-op: pass through unchanged
             spec_e = spec_m
 
         # Post-filter
@@ -570,7 +608,7 @@ class LightDeepFilterNet(nn.Module):
             )
             spec_e = spec_e * pf.unsqueeze(-1)
 
-        return spec_e, m, lsnr, df_coefs
+        return spec_e, m, lsnr, df_coefs, h_enc_new, h_erb_new, h_df_new
 
 
 def init_model(
@@ -618,7 +656,9 @@ if __name__ == "__main__":
 
     # Forward
     with torch.no_grad():
-        enhanced_spec, erb_feat, lsnr, df_coefs = model(spec, feat_erb, feat_spec)
+        enhanced_spec, erb_feat, lsnr, df_coefs, _, _, _ = model(
+            spec, feat_erb, feat_spec
+        )
 
     logger.info("Forward pass OK")
     logger.info(f"  enhanced_spec: {list(enhanced_spec.shape)}")

@@ -1,4 +1,5 @@
 # Python-generated files
+.DS_Store
 __pycache__/
 *.py[oc]
 build/
@@ -33,7 +34,15 @@ datasets/lists/
 datasets/hdf5/
 datasets/downloads/
 wandb/*
-checkpoints/best.pt
-checkpoints/last.pt
-!checkpoints/best.onnx
-!checkpoints/streaming_best.onnx
+checkpoints/
+lightdfn-wasm/pkg/
+
+datasets/demo/*_enhanced.wav
+
+src_rust/target/
+src_rust/pkg/
+
+lightdfn-wasm/target/
+
+node_modules/
+.omc/

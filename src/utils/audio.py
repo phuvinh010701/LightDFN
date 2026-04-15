@@ -1,7 +1,7 @@
-import torch
-from torch import Tensor
 import numpy as np
+import torch
 import torchaudio
+from torch import Tensor
 
 from src.utils.io import resample
 

@@ -25,15 +25,13 @@ from pathlib import Path
 
 import torch
 
+from src.configs.config import load_config
+from src.model.lightdeepfilternet import init_model
 from src.model.streaming import (
     StreamingDfDecoder,
     StreamingEncoder,
     StreamingErbDecoder,
 )
-
-
-from src.configs.config import load_config
-from src.model.lightdeepfilternet import init_model
 from src.utils.io import get_device
 
 logger = logging.getLogger(__name__)

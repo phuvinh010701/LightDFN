@@ -2,59 +2,68 @@
 name = "lightdfn-wasm"
 version = "0.1.0"
 edition = "2021"
-description = "LightDeepFilterNet DSP module (STFT, ERB, features) — compiled to WebAssembly"
+authors = ["LightDFN Contributors"]
+description = "LightDFN noise suppression compiled to WebAssembly"
+license = "MIT"
 
 [lib]
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 # WASM bindings
-wasm-bindgen = "0.2.87"
+wasm-bindgen = "0.2"
 js-sys = "0.3"
-console_error_panic_hook = "0.1.1"
-getrandom = { version = "0.2", features = ["js"] }
+web-sys = { version = "0.3", features = ["console"] }
 
-# Real FFT (r2c / c2r) — pure Rust, compiles to WASM with SIMD
-realfft = "3"
+# FFT
+realfft = "3.1"
 
-# tract ONNX runtime — pure Rust, compiles to both native and WASM
+# tract for ONNX inference
+tract-core = "0.21"
 tract-onnx = "0.21"
+tract-hir = "0.21"
+tract-pulse = "0.21"  # Need this for SimpleState
 
-# tract NNEF — load pre-typed models without runtime into_typed() (WASM + native)
-tract-nnef = "0.21"
+# ndarray for tensor operations (match tract version)
+ndarray = "0.16"  # Changed from 0.15 to match tract
+ndarray-stats = "0.6"  # Updated to match ndarray 0.16
 
-# anyhow — for converter binary (native only)
-[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-anyhow = "1"
-
-# Web APIs (for performance timing + console logging)
-[target.'cfg(target_arch = "wasm32")'.dependencies]
-web-sys = { version = "0.3", features = ["Performance", "Window", "console"] }
+# Utilities
+thiserror = "1.0"
+log = "0.4"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+getrandom = { version = "0.2", features = ["js"] }  # Need "js" feature for WASM
 
 [dev-dependencies]
 wasm-bindgen-test = "0.3"
+criterion = "0.5"
+hound = "3.5"
 
-# ── release profile: maximise DSP throughput ──────────────────────────────────
+[[bench]]
+name = "benchmark"
+harness = false
+
+[features]
+default = ["console_error_panic_hook"]
+console_error_panic_hook = ["dep:console_error_panic_hook"]
+
+[dependencies.console_error_panic_hook]
+version = "0.1"
+optional = true
+
 [profile.release]
 opt-level = 3
-lto = true           # fat LTO: maximum cross-crate inlining, smaller + faster WASM
+lto = true
 codegen-units = 1
-panic = "abort"      # smaller binary, faster panics
 
-# ── wasm-pack release profile with relaxed SIMD ───────────────────────────────
-[package.metadata.wasm-pack.profile.release]
+[profile.release.package."*"]
+opt-level = 3
 wasm-opt = [
   "-O4",
   "--enable-simd",
   "--enable-relaxed-simd",          # Relaxed SIMD for better performance
   "--enable-bulk-memory",
   "--enable-nontrapping-float-to-int",
-  "--enable-sign-ext",
-  "--enable-mutable-globals",
-  "--enable-multivalue",
-  "--enable-reference-types",
   "--fast-math",                     # Aggressive math optimizations
-  "--low-memory-unused",             # Remove unused memory
-  "--flatten",                       # Inline more aggressively
-  "--rereloop",                      # Optimize control flow
 ]
